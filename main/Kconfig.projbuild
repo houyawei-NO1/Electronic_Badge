@@ -1,0 +1,133 @@
+# =============================================================================
+# ESP-IDF Project Configuration (Kconfig.projbuild)
+# =============================================================================
+
+menu "Electronic Badge Configuration"
+
+    config APP_PROJECT_NAME
+        string "Application Project Name"
+        default "electronic_badge"
+        help
+            The name of the application firmware.
+
+    menu "WiFi Configuration"
+        config WIFI_SSID
+            string "Default WiFi SSID"
+            default ""
+            help
+                Default WiFi SSID to connect to.
+                Leave empty to use saved configurations.
+
+        config WIFI_PASSWORD
+            string "Default WiFi Password"
+            default ""
+            help
+                Default WiFi password.
+                Leave empty to use saved configurations.
+
+        config MAX_WIFI_CONFIGS
+            int "Maximum saved WiFi configurations"
+            range 1 10
+            default 5
+            help
+                Maximum number of WiFi configurations to store in NVS.
+    endmenu
+
+    menu "Weather API Configuration"
+        config WEATHER_API_HOST
+            string "Qweather API Host"
+            default "devapi.qweather.com"
+            help
+                API Host for Qweather (和风天气).
+                Get your API Host from https://dev.qweather.com/ console.
+                Format: xxx.qweatherapi.com
+
+        config WEATHER_API_KEY
+            string "Qweather API Key"
+            default ""
+            help
+                API key for Qweather (和风天气).
+                Get one from https://dev.qweather.com/
+
+        config WEATHER_LOCATION
+            string "Location Code"
+            default "101210101"
+            help
+                Location code for weather API.
+                Default is Hangzhou (101210101).
+                Find your city code at https://dev.qweather.com/
+
+        config UPDATE_INTERVAL_MINUTES
+            int "Weather update interval (minutes)"
+            range 5 1440
+            default 30
+            help
+                How often to update weather data (in minutes).
+                Default is 30 minutes.
+    endmenu
+
+    menu "AI Image Generation"
+        config AI_IMAGE_ENABLED
+            bool "Enable AI image generation"
+            default y
+            help
+                Enable generation of AI images based on weather.
+
+        config AI_IMAGE_TIMEOUT_MS
+            int "AI image generation timeout (ms)"
+            range 30000 120000
+            default 60000
+            help
+                Maximum time to wait for AI image generation.
+
+        config AI_IMAGE_WIDTH
+            int "AI image width"
+            default 240
+            help
+                Width of generated AI images.
+
+        config AI_IMAGE_HEIGHT
+            int "AI image height"
+            default 240
+            help
+                Height of generated AI images.
+    endmenu
+
+    menu "Display Configuration"
+        config DISPLAY_TIMEOUT_SECONDS
+            int "Display auto-off timeout (seconds)"
+            range 10 300
+            default 60
+            help
+                How long to keep display on before entering sleep.
+
+        config SPI_CLOCK_MHZ
+            int "SPI clock speed (MHz)"
+            range 1 80
+            default 20
+            help
+                SPI clock speed for display communication.
+                Recommended: 20MHz for stable operation with manual CS control.
+    endmenu
+
+
+
+    menu "Debug Configuration"
+        config DEBUG_MODE
+            bool "Enable debug mode"
+            default n
+            help
+                Enable debug logging for GPIO states.
+                When enabled, prints IO3/IO4 status changes.
+                Disable for power saving in production.
+
+        config DEBUG_LOG_LEVEL
+            int "Debug log level"
+            range 1 5
+            default 3
+            help
+                Debug log verbosity level:
+                1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Verbose
+    endmenu
+
+endmenu
