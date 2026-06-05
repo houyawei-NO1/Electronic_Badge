@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <math.h>
 #include "display.h"
 #include "config.h"
 #include "esp_log.h"
@@ -491,6 +492,8 @@ void display_main_screen(int hour, int minute, const char* weather_text,
 // =============================================================================
 // display_boot_animation - Animated startup sequence
 // =============================================================================
+
+// Animation callbacks for boot animation
 static void _boot_anim_scale_cb(void *obj, int32_t v)
 {
     lv_obj_set_style_translate_x(obj, -v / 2, 0);
@@ -504,6 +507,16 @@ static void _boot_anim_opa_cb(void *obj, int32_t v)
     lv_obj_set_style_opa(obj, v, 0);
 }
 
+static void _boot_anim_y_cb(void *obj, int32_t v)
+{
+    lv_obj_set_y(obj, v);
+}
+
+static void _boot_anim_border_opa_cb(void *obj, int32_t v)
+{
+    lv_obj_set_style_border_opa(obj, v, 0);
+}
+
 void display_boot_animation(void)
 {
     if (!is_initialized || !disp_handle) return;
@@ -512,60 +525,99 @@ void display_boot_animation(void)
     lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
     lv_obj_clean(scr);
 
-    // Dark gradient-like background
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A1628), 0);
+    // Deep dark background
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x060D1A), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     // =========================================================================
-    // Outer ring: animated circle that pulses
+    // Phase 1: Outer glowing ring (pulse from small to large)
     // =========================================================================
-    lv_obj_t *ring = lv_obj_create(scr);
-    lv_obj_remove_style_all(ring);
-    lv_obj_set_size(ring, 80, 80);
-    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_color(ring, lv_color_hex(0x2196F3), 0);
-    lv_obj_set_style_border_width(ring, 3, 0);
-    lv_obj_set_style_border_opa(ring, LV_OPA_50, 0);
-    lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
-    lv_obj_center(ring);
+    lv_obj_t *ring1 = lv_obj_create(scr);
+    lv_obj_remove_style_all(ring1);
+    lv_obj_set_size(ring1, 30, 30);
+    lv_obj_set_style_radius(ring1, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(ring1, lv_color_hex(0x42A5F5), 0);
+    lv_obj_set_style_border_width(ring1, 2, 0);
+    lv_obj_set_style_border_opa(ring1, LV_OPA_30, 0);
+    lv_obj_set_style_bg_opa(ring1, LV_OPA_TRANSP, 0);
+    lv_obj_center(ring1);
 
-    // Scale animation
-    lv_anim_t ring_anim;
-    lv_anim_init(&ring_anim);
-    lv_anim_set_var(&ring_anim, ring);
-    lv_anim_set_exec_cb(&ring_anim, _boot_anim_scale_cb);
-    lv_anim_set_values(&ring_anim, 40, 100);
-    lv_anim_set_duration(&ring_anim, 1200);
-    lv_anim_set_path_cb(&ring_anim, lv_anim_path_ease_out);
-    lv_anim_start(&ring_anim);
+    lv_anim_t a1;
+    lv_anim_init(&a1);
+    lv_anim_set_var(&a1, ring1);
+    lv_anim_set_exec_cb(&a1, _boot_anim_scale_cb);
+    lv_anim_set_values(&a1, 30, 140);
+    lv_anim_set_duration(&a1, 1000);
+    lv_anim_set_path_cb(&a1, lv_anim_path_ease_out);
+    lv_anim_start(&a1);
 
-    // =========================================================================
-    // Inner circle: solid, fades in
-    // =========================================================================
-    lv_obj_t *inner = lv_obj_create(scr);
-    lv_obj_remove_style_all(inner);
-    lv_obj_set_size(inner, 60, 60);
-    lv_obj_set_style_radius(inner, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(inner, lv_color_hex(0x2196F3), 0);
-    lv_obj_set_style_bg_opa(inner, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(inner, 0, 0);
-    lv_obj_set_style_opa(inner, LV_OPA_TRANSP, 0);
-    lv_obj_center(inner);
-
-    // Fade in animation
-    lv_anim_t inner_anim;
-    lv_anim_init(&inner_anim);
-    lv_anim_set_var(&inner_anim, inner);
-    lv_anim_set_exec_cb(&inner_anim, _boot_anim_opa_cb);
-    lv_anim_set_values(&inner_anim, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&inner_anim, 800);
-    lv_anim_set_delay(&inner_anim, 300);
-    lv_anim_set_path_cb(&inner_anim, lv_anim_path_ease_in);
-    lv_anim_start(&inner_anim);
+    // Fade out ring1 border as it expands
+    lv_anim_t a1b;
+    lv_anim_init(&a1b);
+    lv_anim_set_var(&a1b, ring1);
+    lv_anim_set_exec_cb(&a1b, _boot_anim_border_opa_cb);
+    lv_anim_set_values(&a1b, LV_OPA_50, LV_OPA_0);
+    lv_anim_set_duration(&a1b, 1000);
+    lv_anim_set_path_cb(&a1b, lv_anim_path_ease_out);
+    lv_anim_start(&a1b);
 
     // =========================================================================
-    // "E-Badge" text inside the circle
+    // Phase 2: Second ring (delayed, inner accent)
     // =========================================================================
+    lv_obj_t *ring2 = lv_obj_create(scr);
+    lv_obj_remove_style_all(ring2);
+    lv_obj_set_size(ring2, 50, 50);
+    lv_obj_set_style_radius(ring2, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(ring2, lv_color_hex(0x64B5F6), 0);
+    lv_obj_set_style_border_width(ring2, 3, 0);
+    lv_obj_set_style_border_opa(ring2, LV_OPA_0, 0);
+    lv_obj_set_style_bg_opa(ring2, LV_OPA_TRANSP, 0);
+    lv_obj_center(ring2);
+
+    lv_anim_t a2;
+    lv_anim_init(&a2);
+    lv_anim_set_var(&a2, ring2);
+    lv_anim_set_exec_cb(&a2, _boot_anim_scale_cb);
+    lv_anim_set_values(&a2, 50, 110);
+    lv_anim_set_duration(&a2, 900);
+    lv_anim_set_delay(&a2, 200);
+    lv_anim_set_path_cb(&a2, lv_anim_path_ease_out);
+    lv_anim_start(&a2);
+
+    lv_anim_t a2b;
+    lv_anim_init(&a2b);
+    lv_anim_set_var(&a2b, ring2);
+    lv_anim_set_exec_cb(&a2b, _boot_anim_border_opa_cb);
+    lv_anim_set_values(&a2b, LV_OPA_60, LV_OPA_0);
+    lv_anim_set_duration(&a2b, 900);
+    lv_anim_set_delay(&a2b, 200);
+    lv_anim_set_path_cb(&a2b, lv_anim_path_ease_out);
+    lv_anim_start(&a2b);
+
+    // =========================================================================
+    // Phase 3: Solid center circle with logo
+    // =========================================================================
+    lv_obj_t *center_circle = lv_obj_create(scr);
+    lv_obj_remove_style_all(center_circle);
+    lv_obj_set_size(center_circle, 66, 66);
+    lv_obj_set_style_radius(center_circle, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(center_circle, lv_color_hex(0x1565C0), 0);
+    lv_obj_set_style_bg_opa(center_circle, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(center_circle, 0, 0);
+    lv_obj_set_style_opa(center_circle, LV_OPA_TRANSP, 0);
+    lv_obj_center(center_circle);
+
+    lv_anim_t a3;
+    lv_anim_init(&a3);
+    lv_anim_set_var(&a3, center_circle);
+    lv_anim_set_exec_cb(&a3, _boot_anim_opa_cb);
+    lv_anim_set_values(&a3, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&a3, 500);
+    lv_anim_set_delay(&a3, 500);
+    lv_anim_set_path_cb(&a3, lv_anim_path_ease_in);
+    lv_anim_start(&a3);
+
+    // "E" logo inside center circle
     lv_obj_t *logo_text = lv_label_create(scr);
     lv_label_set_text(logo_text, "E");
     lv_obj_set_style_text_color(logo_text, lv_color_hex(0xFFFFFF), 0);
@@ -573,68 +625,137 @@ void display_boot_animation(void)
     lv_obj_set_style_opa(logo_text, LV_OPA_TRANSP, 0);
     lv_obj_center(logo_text);
 
-    lv_anim_t logo_anim;
-    lv_anim_init(&logo_anim);
-    lv_anim_set_var(&logo_anim, logo_text);
-    lv_anim_set_exec_cb(&logo_anim, _boot_anim_opa_cb);
-    lv_anim_set_values(&logo_anim, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&logo_anim, 600);
-    lv_anim_set_delay(&logo_anim, 600);
-    lv_anim_set_path_cb(&logo_anim, lv_anim_path_ease_in);
-    lv_anim_start(&logo_anim);
+    lv_anim_t a4;
+    lv_anim_init(&a4);
+    lv_anim_set_var(&a4, logo_text);
+    lv_anim_set_exec_cb(&a4, _boot_anim_opa_cb);
+    lv_anim_set_values(&a4, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&a4, 400);
+    lv_anim_set_delay(&a4, 800);
+    lv_anim_set_path_cb(&a4, lv_anim_path_ease_in);
+    lv_anim_start(&a4);
 
     // =========================================================================
-    // "电子吧唧" title below
+    // Phase 4: Title "电子吧唧" slides up from below
     // =========================================================================
     lv_obj_t *title = lv_label_create(scr);
     lv_label_set_text(title, "电子吧唧");
-    lv_obj_set_style_text_color(title, lv_color_hex(0x64B5F6), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x90CAF9), 0);
     lv_obj_set_style_text_font(title, &lv_font_source_han_sans_sc_16_cjk, 0);
     lv_obj_set_style_opa(title, LV_OPA_TRANSP, 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 70);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, 90);
+    lv_obj_set_y(title, 105);  // Start slightly lower for slide-up effect
 
-    lv_anim_t title_anim;
-    lv_anim_init(&title_anim);
-    lv_anim_set_var(&title_anim, title);
-    lv_anim_set_exec_cb(&title_anim, _boot_anim_opa_cb);
-    lv_anim_set_values(&title_anim, LV_OPA_TRANSP, LV_OPA_COVER);
-    lv_anim_set_duration(&title_anim, 800);
-    lv_anim_set_delay(&title_anim, 900);
-    lv_anim_set_path_cb(&title_anim, lv_anim_path_ease_in);
-    lv_anim_start(&title_anim);
+    lv_anim_t a5;
+    lv_anim_init(&a5);
+    lv_anim_set_var(&a5, title);
+    lv_anim_set_exec_cb(&a5, _boot_anim_opa_cb);
+    lv_anim_set_values(&a5, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&a5, 500);
+    lv_anim_set_delay(&a5, 1100);
+    lv_anim_set_path_cb(&a5, lv_anim_path_ease_out);
+    lv_anim_start(&a5);
+
+    lv_anim_t a5y;
+    lv_anim_init(&a5y);
+    lv_anim_set_var(&a5y, title);
+    lv_anim_set_exec_cb(&a5y, _boot_anim_y_cb);
+    lv_anim_set_values(&a5y, 105, 90);
+    lv_anim_set_duration(&a5y, 500);
+    lv_anim_set_delay(&a5y, 1100);
+    lv_anim_set_path_cb(&a5y, lv_anim_path_ease_out);
+    lv_anim_start(&a5y);
 
     // =========================================================================
-    // Animated dots at bottom
+    // Phase 5: Subtitle "Powered by ESP32-C3"
+    // =========================================================================
+    lv_obj_t *subtitle = lv_label_create(scr);
+    lv_label_set_text(subtitle, "ESP32-C3");
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x546E7A), 0);
+    lv_obj_set_style_text_font(subtitle, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_opa(subtitle, LV_OPA_TRANSP, 0);
+    lv_obj_align(subtitle, LV_ALIGN_CENTER, 0, 120);
+
+    lv_anim_t a6;
+    lv_anim_init(&a6);
+    lv_anim_set_var(&a6, subtitle);
+    lv_anim_set_exec_cb(&a6, _boot_anim_opa_cb);
+    lv_anim_set_values(&a6, LV_OPA_TRANSP, LV_OPA_60);
+    lv_anim_set_duration(&a6, 400);
+    lv_anim_set_delay(&a6, 1500);
+    lv_anim_set_path_cb(&a6, lv_anim_path_ease_in);
+    lv_anim_start(&a6);
+
+    // =========================================================================
+    // Phase 6: Bottom loading dots
     // =========================================================================
     lv_obj_t *dots = lv_label_create(scr);
-    lv_label_set_text(dots, "● ○ ○");
+    lv_label_set_text(dots, "●  ○  ○");
     lv_obj_set_style_text_color(dots, lv_color_hex(0x42A5F5), 0);
     lv_obj_set_style_text_font(dots, &lv_font_montserrat_14, 0);
     lv_obj_set_style_opa(dots, LV_OPA_TRANSP, 0);
-    lv_obj_align(dots, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_align(dots, LV_ALIGN_BOTTOM_MID, 0, -25);
 
-    lv_anim_t dots_anim;
-    lv_anim_init(&dots_anim);
-    lv_anim_set_var(&dots_anim, dots);
-    lv_anim_set_exec_cb(&dots_anim, _boot_anim_opa_cb);
-    lv_anim_set_values(&dots_anim, LV_OPA_TRANSP, LV_OPA_70);
-    lv_anim_set_duration(&dots_anim, 600);
-    lv_anim_set_delay(&dots_anim, 1200);
-    lv_anim_set_path_cb(&dots_anim, lv_anim_path_ease_in);
-    lv_anim_start(&dots_anim);
+    lv_anim_t a7;
+    lv_anim_init(&a7);
+    lv_anim_set_var(&a7, dots);
+    lv_anim_set_exec_cb(&a7, _boot_anim_opa_cb);
+    lv_anim_set_values(&a7, LV_OPA_TRANSP, LV_OPA_70);
+    lv_anim_set_duration(&a7, 500);
+    lv_anim_set_delay(&a7, 1800);
+    lv_anim_set_path_cb(&a7, lv_anim_path_ease_in);
+    lv_anim_start(&a7);
+
+    // =========================================================================
+    // Decorative accent dots (small circles around the logo)
+    // =========================================================================
+    for (int i = 0; i < 8; i++) {
+        lv_obj_t *dot = lv_obj_create(scr);
+        lv_obj_remove_style_all(dot);
+        lv_obj_set_size(dot, 4, 4);
+        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(0x42A5F5), 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(dot, 0, 0);
+        lv_obj_set_style_opa(dot, LV_OPA_TRANSP, 0);
+
+        // Position dots in a circle around center
+        float angle = (float)i * 3.14159f * 2.0f / 8.0f;
+        int dx = (int)(cosf(angle) * 50.0f);
+        int dy = (int)(sinf(angle) * 50.0f);
+        lv_obj_align(dot, LV_ALIGN_CENTER, dx, dy);
+
+        lv_anim_t a_dot;
+        lv_anim_init(&a_dot);
+        lv_anim_set_var(&a_dot, dot);
+        lv_anim_set_exec_cb(&a_dot, _boot_anim_opa_cb);
+        lv_anim_set_values(&a_dot, LV_OPA_TRANSP, LV_OPA_80);
+        lv_anim_set_duration(&a_dot, 300);
+        lv_anim_set_delay(&a_dot, 600 + i * 80);
+        lv_anim_set_path_cb(&a_dot, lv_anim_path_ease_in);
+        lv_anim_start(&a_dot);
+    }
 
     lvgl_port_unlock();
 
-    // Let the animation play for ~2.5 seconds
-    vTaskDelay(pdMS_TO_TICKS(2500));
+    // Let the animation play for ~2.8 seconds
+    vTaskDelay(pdMS_TO_TICKS(2800));
 }
 
 // =============================================================================
-// display_loading - Beautified loading screen with spinner
+// display_loading - Beautified loading screen with spinning arc
 // =============================================================================
-static void _loading_anim_arc_cb(void *obj, int32_t v)
+
+// Spinning arc animation callback
+static void _loading_anim_spin_cb(void *obj, int32_t v)
 {
-    lv_arc_set_value(obj, v);
+    lv_arc_set_rotation(obj, (int16_t)(v / 10));
+}
+
+// Pulsing dot animation callback
+static void _loading_anim_dot_opa_cb(void *obj, int32_t v)
+{
+    lv_obj_set_style_opa(obj, (lv_opa_t)v, 0);
 }
 
 void display_loading(const char* message)
@@ -645,62 +766,154 @@ void display_loading(const char* message)
     lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
     lv_obj_clean(scr);
 
-    // Dark blue background with slight gradient feel
-    lv_obj_set_style_bg_color(scr, LV_COLOR_LOADING_BG, 0);
+    // Deep blue background
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A1628), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     // =========================================================================
-    // Spinner arc - animated rotating arc
+    // Background decoration: subtle concentric circles
+    // =========================================================================
+    lv_obj_t *bg_ring = lv_obj_create(scr);
+    lv_obj_remove_style_all(bg_ring);
+    lv_obj_set_size(bg_ring, 160, 160);
+    lv_obj_set_style_radius(bg_ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(bg_ring, lv_color_hex(0x1A237E), 0);
+    lv_obj_set_style_border_width(bg_ring, 1, 0);
+    lv_obj_set_style_border_opa(bg_ring, LV_OPA_30, 0);
+    lv_obj_set_style_bg_opa(bg_ring, LV_OPA_TRANSP, 0);
+    lv_obj_center(bg_ring);
+
+    lv_obj_t *bg_ring2 = lv_obj_create(scr);
+    lv_obj_remove_style_all(bg_ring2);
+    lv_obj_set_size(bg_ring2, 200, 200);
+    lv_obj_set_style_radius(bg_ring2, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(bg_ring2, lv_color_hex(0x1A237E), 0);
+    lv_obj_set_style_border_width(bg_ring2, 1, 0);
+    lv_obj_set_style_border_opa(bg_ring2, LV_OPA_10, 0);
+    lv_obj_set_style_bg_opa(bg_ring2, LV_OPA_TRANSP, 0);
+    lv_obj_center(bg_ring2);
+
+    // =========================================================================
+    // Spinning arc indicator (Material Design style)
     // =========================================================================
     lv_obj_t *arc = lv_arc_create(scr);
-    lv_obj_set_size(arc, 70, 70);
+    lv_obj_set_size(arc, 80, 80);
     lv_arc_set_range(arc, 0, 100);
-    lv_arc_set_value(arc, 0);
+    lv_arc_set_value(arc, 25);  // Show 25% of the circle (90° arc)
     lv_arc_set_bg_angles(arc, 0, 360);
-    lv_obj_set_style_arc_width(arc, 4, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(arc, 4, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(arc, lv_color_hex(0x0D47A1), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, 5, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(0x0D1B3E), LV_PART_MAIN);
     lv_obj_set_style_arc_color(arc, lv_color_hex(0x42A5F5), LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(arc, true, LV_PART_INDICATOR);
     lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
     lv_obj_center(arc);
-    lv_obj_set_y(arc, -25);
+    lv_obj_set_y(arc, -20);
 
-    // Arc animation: value oscillates
-    lv_anim_t arc_anim;
-    lv_anim_init(&arc_anim);
-    lv_anim_set_var(&arc_anim, arc);
-    lv_anim_set_exec_cb(&arc_anim, _loading_anim_arc_cb);
-    lv_anim_set_values(&arc_anim, 0, 100);
-    lv_anim_set_duration(&arc_anim, 1500);
-    lv_anim_set_repeat_count(&arc_anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_path_cb(&arc_anim, lv_anim_path_ease_in_out);
-    lv_anim_start(&arc_anim);
+    // Continuous spinning animation: 1 full rotation per second
+     lv_anim_t spin_anim;
+     lv_anim_init(&spin_anim);
+     lv_anim_set_var(&spin_anim, arc);
+     lv_anim_set_exec_cb(&spin_anim, _loading_anim_spin_cb);
+     lv_anim_set_values(&spin_anim, 0, 3600);
+     lv_anim_set_duration(&spin_anim, 1000);
+     lv_anim_set_repeat_count(&spin_anim, LV_ANIM_REPEAT_INFINITE);
+     lv_anim_set_path_cb(&spin_anim, lv_anim_path_linear);
+     lv_anim_start(&spin_anim);
 
     // =========================================================================
-    // Loading text below spinner
+    // Inner subtle dot at center of arc
+    // =========================================================================
+    lv_obj_t *center_dot = lv_obj_create(scr);
+    lv_obj_remove_style_all(center_dot);
+    lv_obj_set_size(center_dot, 8, 8);
+    lv_obj_set_style_radius(center_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(center_dot, lv_color_hex(0x42A5F5), 0);
+    lv_obj_set_style_bg_opa(center_dot, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(center_dot, 0, 0);
+    lv_obj_center(center_dot);
+    lv_obj_set_y(center_dot, -20);
+
+    // Pulse animation for center dot
+    lv_anim_t dot_anim;
+    lv_anim_init(&dot_anim);
+    lv_anim_set_var(&dot_anim, center_dot);
+    lv_anim_set_exec_cb(&dot_anim, _loading_anim_dot_opa_cb);
+    lv_anim_set_values(&dot_anim, LV_OPA_20, LV_OPA_80);
+    lv_anim_set_duration(&dot_anim, 1000);
+    lv_anim_set_repeat_count(&dot_anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_playback_duration(&dot_anim, 1000);
+    lv_anim_set_path_cb(&dot_anim, lv_anim_path_ease_in_out);
+    lv_anim_start(&dot_anim);
+
+    // =========================================================================
+    // Loading message text
     // =========================================================================
     lv_obj_t *msg_label = lv_label_create(scr);
-    if (message) {
+    if (message && strlen(message) > 0) {
         lv_label_set_text(msg_label, message);
     } else {
         lv_label_set_text(msg_label, "加载中...");
     }
-    lv_obj_set_style_text_color(msg_label, LV_COLOR_LOADING_TXT, 0);
+    lv_obj_set_style_text_color(msg_label, lv_color_hex(0xE0E0E0), 0);
     lv_obj_set_style_text_font(msg_label, &lv_font_source_han_sans_sc_16_cjk, 0);
     lv_obj_set_style_text_align(msg_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(msg_label, LV_ALIGN_CENTER, 0, 35);
+    lv_obj_align(msg_label, LV_ALIGN_CENTER, 0, 40);
 
     // =========================================================================
-    // Animated dots below text
+    // Animated progress dots (three dots with sequential fade)
     // =========================================================================
-    lv_obj_t *dots = lv_label_create(scr);
-    lv_label_set_text(dots, "···");
-    lv_obj_set_style_text_color(dots, lv_color_hex(0x42A5F5), 0);
-    lv_obj_set_style_text_font(dots, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_align(dots, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_opa(dots, LV_OPA_70, 0);
-    lv_obj_align(dots, LV_ALIGN_CENTER, 0, 60);
+    lv_obj_t *dot1 = lv_label_create(scr);
+    lv_label_set_text(dot1, "●");
+    lv_obj_set_style_text_color(dot1, lv_color_hex(0x42A5F5), 0);
+    lv_obj_set_style_text_font(dot1, &lv_font_montserrat_14, 0);
+    lv_obj_align(dot1, LV_ALIGN_CENTER, -20, 65);
+
+    lv_obj_t *dot2 = lv_label_create(scr);
+    lv_label_set_text(dot2, "●");
+    lv_obj_set_style_text_color(dot2, lv_color_hex(0x64B5F6), 0);
+    lv_obj_set_style_text_font(dot2, &lv_font_montserrat_14, 0);
+    lv_obj_align(dot2, LV_ALIGN_CENTER, 0, 65);
+
+    lv_obj_t *dot3 = lv_label_create(scr);
+    lv_label_set_text(dot3, "●");
+    lv_obj_set_style_text_color(dot3, lv_color_hex(0x90CAF9), 0);
+    lv_obj_set_style_text_font(dot3, &lv_font_montserrat_14, 0);
+    lv_obj_align(dot3, LV_ALIGN_CENTER, 20, 65);
+
+    // Sequential fade animations for dots
+    lv_anim_t d1, d2, d3;
+    lv_anim_init(&d1);
+    lv_anim_set_var(&d1, dot1);
+    lv_anim_set_exec_cb(&d1, _loading_anim_dot_opa_cb);
+    lv_anim_set_values(&d1, LV_OPA_30, LV_OPA_COVER);
+    lv_anim_set_duration(&d1, 600);
+    lv_anim_set_repeat_count(&d1, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_playback_duration(&d1, 600);
+    lv_anim_set_path_cb(&d1, lv_anim_path_ease_in_out);
+    lv_anim_start(&d1);
+
+    lv_anim_init(&d2);
+    lv_anim_set_var(&d2, dot2);
+    lv_anim_set_exec_cb(&d2, _loading_anim_dot_opa_cb);
+    lv_anim_set_values(&d2, LV_OPA_30, LV_OPA_COVER);
+    lv_anim_set_duration(&d2, 600);
+    lv_anim_set_delay(&d2, 200);
+    lv_anim_set_repeat_count(&d2, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_playback_duration(&d2, 600);
+    lv_anim_set_path_cb(&d2, lv_anim_path_ease_in_out);
+    lv_anim_start(&d2);
+
+    lv_anim_init(&d3);
+    lv_anim_set_var(&d3, dot3);
+    lv_anim_set_exec_cb(&d3, _loading_anim_dot_opa_cb);
+    lv_anim_set_values(&d3, LV_OPA_30, LV_OPA_COVER);
+    lv_anim_set_duration(&d3, 600);
+    lv_anim_set_delay(&d3, 400);
+    lv_anim_set_repeat_count(&d3, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_playback_duration(&d3, 600);
+    lv_anim_set_path_cb(&d3, lv_anim_path_ease_in_out);
+    lv_anim_start(&d3);
 
     lvgl_port_unlock();
 }
