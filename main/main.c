@@ -52,8 +52,8 @@ static void sync_time(void)
     
     esp_netif_sntp_deinit();
     
-    // Set timezone
-    setenv("TZ", "Asia/Shanghai", 1);
+    // Set timezone to China Standard Time (CST-8)
+    setenv("TZ", "CST-8", 1);
     tzset();
     
     time_t now;
@@ -78,13 +78,16 @@ static void enter_display_mode(void)
     display_init();
     display_backlight_on();
     
+    // Show boot animation
+    display_boot_animation();
+    
     // Get current time
     time_t now;
     time(&now);
     struct tm* tm_info = localtime(&now);
     
     // Display main screen
-    const char* weather_text = s_has_rtc_data ? s_rtc_data.weather_text : "Sunny";
+    const char* weather_text = s_has_rtc_data ? s_rtc_data.weather_text : "晴";
     int temperature = s_has_rtc_data ? s_rtc_data.temperature : 25;
     
     display_main_screen(tm_info->tm_hour, tm_info->tm_min,
@@ -123,7 +126,7 @@ static void enter_display_mode(void)
             ESP_LOGI(TAG, "Short press REFRESH, manual update");
             
             // Manual refresh: connect WiFi, sync time, fetch weather, update display
-            display_loading("Updating...");
+            display_loading("更新中...");
             
             if (wifi_connect()) {
                 sync_time();
@@ -158,14 +161,14 @@ static void enter_display_mode(void)
                     ESP_LOGI(TAG, "Weather updated successfully");
                 } else {
                     ESP_LOGW(TAG, "Weather fetch failed");
-                    display_loading("Update Failed");
+                    display_loading("更新失败");
                     vTaskDelay(pdMS_TO_TICKS(1000));
                     // Restore previous display
                     time_t now;
                     time(&now);
                     struct tm* tm_info = localtime(&now);
                     display_main_screen(tm_info->tm_hour, tm_info->tm_min,
-                                       s_has_rtc_data ? s_rtc_data.weather_text : "Sunny",
+                                       s_has_rtc_data ? s_rtc_data.weather_text : "晴",
                                        s_has_rtc_data ? s_rtc_data.temperature : 25,
                                        s_rtc_data.last_update_timestamp);
                 }
@@ -173,7 +176,7 @@ static void enter_display_mode(void)
                 wifi_disconnect();
             } else {
                 ESP_LOGW(TAG, "WiFi connection failed for manual update");
-                display_loading("WiFi Failed");
+                display_loading("WiFi连接失败");
                 vTaskDelay(pdMS_TO_TICKS(1000));
             }
             
@@ -208,7 +211,7 @@ static bool enter_update_mode(bool* out_wifi_failed)
     // Initialize display for update progress
     display_init();
     display_backlight_on();
-    display_loading("Connecting...");
+    display_loading("连接中...");
     
     // Load RTC data
     bool rtc_valid = power_load_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
@@ -221,7 +224,7 @@ static bool enter_update_mode(bool* out_wifi_failed)
     // Connect to WiFi
     if (!wifi_connect()) {
         ESP_LOGW(TAG, "WiFi connection failed");
-        display_loading("WiFi Failed");
+        display_loading("WiFi连接失败");
         vTaskDelay(pdMS_TO_TICKS(1000));
         display_backlight_off();
         display_deinit();
@@ -231,7 +234,7 @@ static bool enter_update_mode(bool* out_wifi_failed)
         return false;
     }
     
-    display_loading("Updating...");
+    display_loading("更新中...");
     
     // Sync time
     sync_time();
@@ -251,7 +254,7 @@ static bool enter_update_mode(bool* out_wifi_failed)
                 sizeof(s_rtc_data.weather_text) - 1);
         
         // Generate AI image (if enabled in sdkconfig)
-        display_loading("AI Image...");
+        display_loading("AI生成图片中...");
         const char* festival = ai_get_current_festival();
         if (CONFIG_AI_IMAGE_ENABLED && ai_image_generate(s_weather_data.weather_text,
                               s_weather_data.temperature, festival)) {
@@ -267,7 +270,7 @@ static bool enter_update_mode(bool* out_wifi_failed)
     time(&now);
     struct tm* tm_info = localtime(&now);
     display_main_screen(tm_info->tm_hour, tm_info->tm_min,
-                       s_has_rtc_data ? s_rtc_data.weather_text : "Sunny",
+                       s_has_rtc_data ? s_rtc_data.weather_text : "晴",
                        s_has_rtc_data ? s_rtc_data.temperature : 25,
                        s_rtc_data.last_update_timestamp);
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -315,7 +318,7 @@ static void enter_config_mode(void)
     // Start SmartConfig
     if (!wifi_start_smartconfig()) {
         ESP_LOGE(TAG, "Failed to start SmartConfig");
-        display_loading("FAILED");
+        display_loading("失败");
         vTaskDelay(pdMS_TO_TICKS(2000));
         goto config_cleanup;
     }
@@ -363,7 +366,7 @@ static void enter_config_mode(void)
     
     if (!config_success && timeout_counter >= SMARTCONFIG_TIMEOUT_MS) {
         ESP_LOGW(TAG, "SmartConfig timeout (一键配网超时)");
-        display_loading("Timeout");
+        display_loading("超时");
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
     

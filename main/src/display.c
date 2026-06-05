@@ -58,8 +58,8 @@ static const gc9a01_lcd_init_cmd_t gc9a01_init_cmds[] = {
     // Display function control
     {0xB6, (uint8_t[]){0x20}, 1, 0},
 
-    // Memory Access Control (0x08 = BGR only, no mirror)
-    // 0x48 had MX (mirror X) bit set causing horizontal flip
+    // Memory Access Control (0x08 = BGR only)
+    // Normal orientation, let LVGL handle rotation
     {0x36, (uint8_t[]){0x08}, 1, 0},
 
     // Pixel Format Set (0x05 = 16-bit)
@@ -214,13 +214,13 @@ static lv_color_t get_weather_bg_color(weather_type_t weather)
 static const char* get_weather_name(weather_type_t weather)
 {
     switch (weather) {
-        case WEATHER_SUNNY:   return "Sunny";
-        case WEATHER_CLOUDY:  return "Cloudy";
-        case WEATHER_RAINY:   return "Rainy";
-        case WEATHER_SNOWY:   return "Snowy";
-        case WEATHER_THUNDER: return "Thunder";
-        case WEATHER_FOGGY:   return "Foggy";
-        default:              return "Sunny";
+        case WEATHER_SUNNY:   return "晴";
+        case WEATHER_CLOUDY:  return "多云";
+        case WEATHER_RAINY:   return "雨";
+        case WEATHER_SNOWY:   return "雪";
+        case WEATHER_THUNDER: return "雷暴";
+        case WEATHER_FOGGY:   return "雾";
+        default:              return "晴";
     }
 }
 
@@ -350,7 +350,7 @@ esp_err_t display_init(void)
         .vres = DISPLAY_HEIGHT,
         .rotation = {
             .swap_xy = false,
-            .mirror_x = false,
+            .mirror_x = true,    // Horizontal flip to correct mirrored display
             .mirror_y = false,
         },
         .flags = {
@@ -441,11 +441,11 @@ void display_main_screen(int hour, int minute, const char* weather_text,
     lv_obj_set_style_text_opa(icon_label, LV_OPA_60, 0);
     lv_obj_align(icon_label, LV_ALIGN_TOP_MID, 0, 30);
 
-    // Weather name below icon
+    // Weather name below icon (Chinese font)
     lv_obj_t *weather_label = lv_label_create(scr);
     lv_label_set_text(weather_label, get_weather_name(weather));
     lv_obj_set_style_text_color(weather_label, LV_COLOR_TEMP_CYAN, 0);
-    lv_obj_set_style_text_font(weather_label, &lv_font_montserrat_14, 0);  // Use available font
+    lv_obj_set_style_text_font(weather_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
     lv_obj_align(weather_label, LV_ALIGN_TOP_MID, 0, 95);
 
     // -----------------------------------------------------------------
@@ -453,10 +453,10 @@ void display_main_screen(int hour, int minute, const char* weather_text,
     // -----------------------------------------------------------------
     lv_obj_t *temp_label = lv_label_create(scr);
     char temp_str[32];
-    snprintf(temp_str, sizeof(temp_str), "%dC", temperature);  // Simplified, no degree symbol
+    snprintf(temp_str, sizeof(temp_str), "%d°C", temperature);  // With degree symbol
     lv_label_set_text(temp_label, temp_str);
     lv_obj_set_style_text_color(temp_label, LV_COLOR_TIME_WHITE, 0);
-    lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_14, 0);  // Use available font
+    lv_obj_set_style_text_font(temp_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
     lv_obj_align(temp_label, LV_ALIGN_TOP_MID, 0, 125);
 
     // -----------------------------------------------------------------
@@ -478,10 +478,10 @@ void display_main_screen(int hour, int minute, const char* weather_text,
         time_t update_time = (time_t)last_update;
         struct tm* tm_info = localtime(&update_time);
         char update_str[32];
-        strftime(update_str, sizeof(update_str), "Updated: %H:%M", tm_info);
+        strftime(update_str, sizeof(update_str), "更新: %H:%M", tm_info);
         lv_label_set_text(update_label, update_str);
         lv_obj_set_style_text_color(update_label, LV_COLOR_UPDATE_GRAY, 0);
-        lv_obj_set_style_text_font(update_label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(update_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
         lv_obj_align(update_label, LV_ALIGN_BOTTOM_MID, 0, -10);
     }
 
@@ -489,33 +489,218 @@ void display_main_screen(int hour, int minute, const char* weather_text,
 }
 
 // =============================================================================
-// display_loading - Loading screen with spinner and message
+// display_boot_animation - Animated startup sequence
 // =============================================================================
+static void _boot_anim_scale_cb(void *obj, int32_t v)
+{
+    lv_obj_set_style_translate_x(obj, -v / 2, 0);
+    lv_obj_set_style_translate_y(obj, -v / 2, 0);
+    lv_obj_set_style_width(obj, v, 0);
+    lv_obj_set_style_height(obj, v, 0);
+}
+
+static void _boot_anim_opa_cb(void *obj, int32_t v)
+{
+    lv_obj_set_style_opa(obj, v, 0);
+}
+
+void display_boot_animation(void)
+{
+    if (!is_initialized || !disp_handle) return;
+
+    lvgl_port_lock(0);
+    lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
+    lv_obj_clean(scr);
+
+    // Dark gradient-like background
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A1628), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    // =========================================================================
+    // Outer ring: animated circle that pulses
+    // =========================================================================
+    lv_obj_t *ring = lv_obj_create(scr);
+    lv_obj_remove_style_all(ring);
+    lv_obj_set_size(ring, 80, 80);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(ring, lv_color_hex(0x2196F3), 0);
+    lv_obj_set_style_border_width(ring, 3, 0);
+    lv_obj_set_style_border_opa(ring, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+    lv_obj_center(ring);
+
+    // Scale animation
+    lv_anim_t ring_anim;
+    lv_anim_init(&ring_anim);
+    lv_anim_set_var(&ring_anim, ring);
+    lv_anim_set_exec_cb(&ring_anim, _boot_anim_scale_cb);
+    lv_anim_set_values(&ring_anim, 40, 100);
+    lv_anim_set_duration(&ring_anim, 1200);
+    lv_anim_set_path_cb(&ring_anim, lv_anim_path_ease_out);
+    lv_anim_start(&ring_anim);
+
+    // =========================================================================
+    // Inner circle: solid, fades in
+    // =========================================================================
+    lv_obj_t *inner = lv_obj_create(scr);
+    lv_obj_remove_style_all(inner);
+    lv_obj_set_size(inner, 60, 60);
+    lv_obj_set_style_radius(inner, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(inner, lv_color_hex(0x2196F3), 0);
+    lv_obj_set_style_bg_opa(inner, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(inner, 0, 0);
+    lv_obj_set_style_opa(inner, LV_OPA_TRANSP, 0);
+    lv_obj_center(inner);
+
+    // Fade in animation
+    lv_anim_t inner_anim;
+    lv_anim_init(&inner_anim);
+    lv_anim_set_var(&inner_anim, inner);
+    lv_anim_set_exec_cb(&inner_anim, _boot_anim_opa_cb);
+    lv_anim_set_values(&inner_anim, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&inner_anim, 800);
+    lv_anim_set_delay(&inner_anim, 300);
+    lv_anim_set_path_cb(&inner_anim, lv_anim_path_ease_in);
+    lv_anim_start(&inner_anim);
+
+    // =========================================================================
+    // "E-Badge" text inside the circle
+    // =========================================================================
+    lv_obj_t *logo_text = lv_label_create(scr);
+    lv_label_set_text(logo_text, "E");
+    lv_obj_set_style_text_color(logo_text, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(logo_text, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_opa(logo_text, LV_OPA_TRANSP, 0);
+    lv_obj_center(logo_text);
+
+    lv_anim_t logo_anim;
+    lv_anim_init(&logo_anim);
+    lv_anim_set_var(&logo_anim, logo_text);
+    lv_anim_set_exec_cb(&logo_anim, _boot_anim_opa_cb);
+    lv_anim_set_values(&logo_anim, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&logo_anim, 600);
+    lv_anim_set_delay(&logo_anim, 600);
+    lv_anim_set_path_cb(&logo_anim, lv_anim_path_ease_in);
+    lv_anim_start(&logo_anim);
+
+    // =========================================================================
+    // "电子吧唧" title below
+    // =========================================================================
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "电子吧唧");
+    lv_obj_set_style_text_color(title, lv_color_hex(0x64B5F6), 0);
+    lv_obj_set_style_text_font(title, &lv_font_source_han_sans_sc_16_cjk, 0);
+    lv_obj_set_style_opa(title, LV_OPA_TRANSP, 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, 70);
+
+    lv_anim_t title_anim;
+    lv_anim_init(&title_anim);
+    lv_anim_set_var(&title_anim, title);
+    lv_anim_set_exec_cb(&title_anim, _boot_anim_opa_cb);
+    lv_anim_set_values(&title_anim, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_duration(&title_anim, 800);
+    lv_anim_set_delay(&title_anim, 900);
+    lv_anim_set_path_cb(&title_anim, lv_anim_path_ease_in);
+    lv_anim_start(&title_anim);
+
+    // =========================================================================
+    // Animated dots at bottom
+    // =========================================================================
+    lv_obj_t *dots = lv_label_create(scr);
+    lv_label_set_text(dots, "● ○ ○");
+    lv_obj_set_style_text_color(dots, lv_color_hex(0x42A5F5), 0);
+    lv_obj_set_style_text_font(dots, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_opa(dots, LV_OPA_TRANSP, 0);
+    lv_obj_align(dots, LV_ALIGN_BOTTOM_MID, 0, -30);
+
+    lv_anim_t dots_anim;
+    lv_anim_init(&dots_anim);
+    lv_anim_set_var(&dots_anim, dots);
+    lv_anim_set_exec_cb(&dots_anim, _boot_anim_opa_cb);
+    lv_anim_set_values(&dots_anim, LV_OPA_TRANSP, LV_OPA_70);
+    lv_anim_set_duration(&dots_anim, 600);
+    lv_anim_set_delay(&dots_anim, 1200);
+    lv_anim_set_path_cb(&dots_anim, lv_anim_path_ease_in);
+    lv_anim_start(&dots_anim);
+
+    lvgl_port_unlock();
+
+    // Let the animation play for ~2.5 seconds
+    vTaskDelay(pdMS_TO_TICKS(2500));
+}
+
+// =============================================================================
+// display_loading - Beautified loading screen with spinner
+// =============================================================================
+static void _loading_anim_arc_cb(void *obj, int32_t v)
+{
+    lv_arc_set_value(obj, v);
+}
+
 void display_loading(const char* message)
 {
     if (!is_initialized || !disp_handle) return;
 
     lvgl_port_lock(0);
     lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
-
-    // Clean screen
     lv_obj_clean(scr);
 
-    // Set background
+    // Dark blue background with slight gradient feel
     lv_obj_set_style_bg_color(scr, LV_COLOR_LOADING_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    // Loading text (spinner replaced with simple text for memory saving)
+    // =========================================================================
+    // Spinner arc - animated rotating arc
+    // =========================================================================
+    lv_obj_t *arc = lv_arc_create(scr);
+    lv_obj_set_size(arc, 70, 70);
+    lv_arc_set_range(arc, 0, 100);
+    lv_arc_set_value(arc, 0);
+    lv_arc_set_bg_angles(arc, 0, 360);
+    lv_obj_set_style_arc_width(arc, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(0x0D47A1), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc, lv_color_hex(0x42A5F5), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(arc, true, LV_PART_INDICATOR);
+    lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
+    lv_obj_center(arc);
+    lv_obj_set_y(arc, -25);
+
+    // Arc animation: value oscillates
+    lv_anim_t arc_anim;
+    lv_anim_init(&arc_anim);
+    lv_anim_set_var(&arc_anim, arc);
+    lv_anim_set_exec_cb(&arc_anim, _loading_anim_arc_cb);
+    lv_anim_set_values(&arc_anim, 0, 100);
+    lv_anim_set_duration(&arc_anim, 1500);
+    lv_anim_set_repeat_count(&arc_anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&arc_anim, lv_anim_path_ease_in_out);
+    lv_anim_start(&arc_anim);
+
+    // =========================================================================
+    // Loading text below spinner
+    // =========================================================================
     lv_obj_t *msg_label = lv_label_create(scr);
     if (message) {
         lv_label_set_text(msg_label, message);
     } else {
-        lv_label_set_text(msg_label, "Loading...");
+        lv_label_set_text(msg_label, "加载中...");
     }
     lv_obj_set_style_text_color(msg_label, LV_COLOR_LOADING_TXT, 0);
-    lv_obj_set_style_text_font(msg_label, &lv_font_montserrat_14, 0);  // Use available font
+    lv_obj_set_style_text_font(msg_label, &lv_font_source_han_sans_sc_16_cjk, 0);
     lv_obj_set_style_text_align(msg_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(msg_label);
+    lv_obj_align(msg_label, LV_ALIGN_CENTER, 0, 35);
+
+    // =========================================================================
+    // Animated dots below text
+    // =========================================================================
+    lv_obj_t *dots = lv_label_create(scr);
+    lv_label_set_text(dots, "···");
+    lv_obj_set_style_text_color(dots, lv_color_hex(0x42A5F5), 0);
+    lv_obj_set_style_text_font(dots, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_align(dots, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_opa(dots, LV_OPA_70, 0);
+    lv_obj_align(dots, LV_ALIGN_CENTER, 0, 60);
 
     lvgl_port_unlock();
 }
@@ -546,25 +731,25 @@ void display_config_mode(void)
 
     // "CONFIG MODE" title
     lv_obj_t *title_label = lv_label_create(scr);
-    lv_label_set_text(title_label, "CONFIG MODE");
+    lv_label_set_text(title_label, "配网模式");
     lv_obj_set_style_text_color(title_label, LV_COLOR_CONFIG_TXT, 0);
-    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_14, 0);  // Use available font
+    lv_obj_set_style_text_font(title_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
     lv_obj_set_style_text_align(title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 95);
 
     // Instruction text
     lv_obj_t *info_label = lv_label_create(scr);
-    lv_label_set_text(info_label, "Use WeChat Mini Program\n\"Yi Jian Pei Wang\"\nto configure WiFi");
-    lv_obj_set_style_text_color(info_label, lv_color_hex(0x90CAF9), 0);
-    lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(info_label, "请打开微信小程序\n\"一键配网\"\n进行WiFi配置");
+    lv_obj_set_style_text_color(info_label, LV_COLOR_CONFIG_TXT, 0);
+    lv_obj_set_style_text_font(info_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
     lv_obj_set_style_text_align(info_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(info_label, LV_ALIGN_TOP_MID, 0, 130);
 
     // Waiting indicator (pulsing dot)
     lv_obj_t *dot_label = lv_label_create(scr);
-    lv_label_set_text(dot_label, LV_SYMBOL_BULLET " Waiting...");
-    lv_obj_set_style_text_color(dot_label, lv_color_hex(0x64B5F6), 0);
-    lv_obj_set_style_text_font(dot_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(dot_label, LV_SYMBOL_BULLET " 等待连接...");
+    lv_obj_set_style_text_color(dot_label, LV_COLOR_CONFIG_TXT, 0);
+    lv_obj_set_style_text_font(dot_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
     lv_obj_align(dot_label, LV_ALIGN_BOTTOM_MID, 0, -20);
 
     lvgl_port_unlock();
@@ -596,17 +781,17 @@ void display_config_success(void)
 
     // Success text
     lv_obj_t *msg_label = lv_label_create(scr);
-    lv_label_set_text(msg_label, "Connected!");
+    lv_label_set_text(msg_label, "连接成功!");
     lv_obj_set_style_text_color(msg_label, LV_COLOR_SUCCESS_TXT, 0);
-    lv_obj_set_style_text_font(msg_label, &lv_font_montserrat_14, 0);  // Use available font
+    lv_obj_set_style_text_font(msg_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
     lv_obj_set_style_text_align(msg_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(msg_label, LV_ALIGN_TOP_MID, 0, 110);
 
     // Sub text
     lv_obj_t *sub_label = lv_label_create(scr);
-    lv_label_set_text(sub_label, "WiFi configured");
-    lv_obj_set_style_text_color(sub_label, lv_color_hex(0xA5D6A7), 0);
-    lv_obj_set_style_text_font(sub_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text(sub_label, "WiFi已配置");
+    lv_obj_set_style_text_color(sub_label, LV_COLOR_SUCCESS_TXT, 0);
+    lv_obj_set_style_text_font(sub_label, &lv_font_source_han_sans_sc_16_cjk, 0);  // Chinese font
     lv_obj_set_style_text_align(sub_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(sub_label, LV_ALIGN_TOP_MID, 0, 145);
 

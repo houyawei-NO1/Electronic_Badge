@@ -42,6 +42,11 @@ typedef enum {
 esp_err_t display_init(void);
 
 /**
+ * @brief Display boot animation with logo
+ */
+void display_boot_animation(void);
+
+/**
  * @brief Turn on display backlight
  */
 void display_backlight_on(void);
