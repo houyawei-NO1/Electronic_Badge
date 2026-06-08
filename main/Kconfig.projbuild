@@ -51,10 +51,10 @@ menu "Electronic Badge Configuration"
 
         config WEATHER_LOCATION
             string "Location Code"
-            default "101210101"
+            default "101180714"
             help
                 Location code for weather API.
-                Default is Hangzhou (101210101).
+                Default is NanYangWoLong (101180714).
                 Find your city code at https://dev.qweather.com/
 
         config UPDATE_INTERVAL_MINUTES
@@ -66,31 +66,19 @@ menu "Electronic Badge Configuration"
                 Default is 30 minutes.
     endmenu
 
-    menu "AI Image Generation"
-        config AI_IMAGE_ENABLED
-            bool "Enable AI image generation"
+    menu "Weather Icons"
+        config WEATHER_ICON_ENABLED
+            bool "Enable weather icon display"
             default y
             help
-                Enable generation of AI images based on weather.
+                Display weather icons from local resources.
 
-        config AI_IMAGE_TIMEOUT_MS
-            int "AI image generation timeout (ms)"
-            range 30000 120000
-            default 60000
+        config WEATHER_ICON_SIZE
+            int "Weather icon size (px)"
+            range 32 128
+            default 52
             help
-                Maximum time to wait for AI image generation.
-
-        config AI_IMAGE_WIDTH
-            int "AI image width"
-            default 240
-            help
-                Width of generated AI images.
-
-        config AI_IMAGE_HEIGHT
-            int "AI image height"
-            default 240
-            help
-                Height of generated AI images.
+                Size of weather icons on display.
     endmenu
 
     menu "Display Configuration"

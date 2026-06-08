@@ -32,8 +32,7 @@
 #define GPIO_SPI_MOSI     10   // SDA (SPI Data)
 #define GPIO_LCD_DC       7    // DC (Data/Command)
 #define GPIO_LCD_CS       6    // CS (Chip Select)
-#define GPIO_LCD_RST      5    // RST (Reset, also controls backlight power)
-#define GPIO_LCD_BL       5    // BLK not routed, use RST for backlight control
+#define GPIO_LCD_RST      5    // RST (Reset for GC9A01 controller)
 #define GPIO_BTN_WAKE     4    // WAKE button
 #define GPIO_BTN_REFRESH  3    // REFRESH button
 
@@ -97,34 +96,7 @@
 #ifdef CONFIG_WEATHER_LOCATION
 #define WEATHER_LOCATION   CONFIG_WEATHER_LOCATION
 #else
-#define WEATHER_LOCATION   "101210101"  // Hangzhou, default
-#endif
-
-// =============================================================================
-// AI Image Generation (Pollinations.AI, from sdkconfig)
-// =============================================================================
-#define AI_IMAGE_URL       "https://image.pollinations.ai/prompt/"
-
-#ifndef CONFIG_AI_IMAGE_ENABLED
-#define CONFIG_AI_IMAGE_ENABLED 1  // Default enabled
-#endif
-
-#ifdef CONFIG_AI_IMAGE_TIMEOUT_MS
-#define AI_IMAGE_TIMEOUT_MS    CONFIG_AI_IMAGE_TIMEOUT_MS
-#else
-#define AI_IMAGE_TIMEOUT_MS    60000  // 60 seconds default
-#endif
-
-#ifdef CONFIG_AI_IMAGE_WIDTH
-#define AI_IMAGE_WIDTH     CONFIG_AI_IMAGE_WIDTH
-#else
-#define AI_IMAGE_WIDTH     240
-#endif
-
-#ifdef CONFIG_AI_IMAGE_HEIGHT
-#define AI_IMAGE_HEIGHT    CONFIG_AI_IMAGE_HEIGHT
-#else
-#define AI_IMAGE_HEIGHT    240
+#define WEATHER_LOCATION   "101180714"  // NanYangWoLong, default
 #endif
 
 // =============================================================================
@@ -137,8 +109,6 @@
 // =============================================================================
 // RTC Memory (persist across deep sleep)
 // =============================================================================
-#define RTC_MEMORY_OFFSET   0
-
 #define RTC_DATA_MAGIC      0xBAD00001  // Magic number to validate RTC data
 
 typedef struct {
@@ -148,8 +118,8 @@ typedef struct {
     int8_t temperature;
     int8_t feels_like;
     uint8_t humidity;
+    uint8_t wind_scale;      // 风力等级
     char weather_text[16];
-    uint8_t has_ai_image;
     uint32_t boot_count;
 } rtc_data_t;
 
@@ -158,8 +128,6 @@ typedef struct {
 // =============================================================================
 #define NVS_NAMESPACE       "badge_config"
 #define NVS_KEY_WIFI_PREFIX "wifi_"
-#define NVS_KEY_UPDATE_INT  "update_int"
-#define NVS_KEY_TIMEZONE    "timezone"
 
 // =============================================================================
 // Debug Mode Configuration (from sdkconfig)
@@ -172,13 +140,6 @@ typedef struct {
 #else
     #define DEBUG_LOG(tag, fmt, ...) ((void)0)
     #define DEBUG_LOG_GPIO(tag, gpio_num, level) ((void)0)
-#endif
-
-// =============================================================================
-// Debug Log Level (from sdkconfig)
-// =============================================================================
-#ifdef CONFIG_DEBUG_LOG_LEVEL
-    #define APP_LOG_LEVEL CONFIG_DEBUG_LOG_LEVEL
 #endif
 
 #endif // CONFIG_H

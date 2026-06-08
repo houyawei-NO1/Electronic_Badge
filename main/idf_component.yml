@@ -1,4 +1,6 @@
 dependencies:
   espressif/esp_lvgl_port: "^2.6.0"
-  lvgl/lvgl: "^9.5.0"
+  lvgl/lvgl:
+    version: "^8.3"
+    public: true
   espressif/esp_lcd_gc9a01: "^2.0.0"

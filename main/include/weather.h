@@ -11,19 +11,17 @@
 // Weather data structure
 typedef struct {
     int16_t weather_code;      // Weather condition code
-    int8_t temperature;       // Temperature in Celsius
+    int8_t temperature;        // Temperature in Celsius
     int8_t feels_like;         // Feels like temperature
     uint8_t humidity;          // Humidity percentage
-    uint8_t wind_speed;        // Wind speed
+    uint8_t wind_speed;        // Wind speed (km/h)
+    uint8_t wind_scale;        // Wind scale (Beaufort, 0-12)
+    uint16_t pressure;         // Atmospheric pressure (hPa)
+    uint8_t visibility;        // Visibility (km)
     char weather_text[32];     // Weather description
     char wind_dir[16];         // Wind direction
     uint32_t update_time;      // Last update timestamp
 } weather_data_t;
-
-/**
- * @brief Initialize weather module
- */
-void weather_init(void);
 
 /**
  * @brief Fetch current weather data
@@ -31,19 +29,5 @@ void weather_init(void);
  * @return true if successful
  */
 bool weather_fetch(weather_data_t* data);
-
-/**
- * @brief Get weather text from weather code
- * @param code Weather condition code
- * @return Weather text description
- */
-const char* weather_get_text(int16_t code);
-
-/**
- * @brief Convert weather code to weather type for icons
- * @param code Weather condition code
- * @return Weather type enum
- */
-int weather_code_to_type(int16_t code);
 
 #endif // WEATHER_H

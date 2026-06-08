@@ -8,14 +8,15 @@
 #include "config.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_crt_bundle.h"
 #include "miniz.h"
 
-static const char* TAG = "Weather";
+static const char* TAG = "天气";
 
 static bool gzip_decompress(const uint8_t* input, size_t input_len, char* output, size_t* output_len)
 {
     if (!input || !output || !output_len || *output_len == 0) {
-        ESP_LOGE(TAG,"null param");
+        ESP_LOGE(TAG,"参数为空");
         return false;
     }
 
@@ -43,11 +44,11 @@ static bool gzip_decompress(const uint8_t* input, size_t input_len, char* output
     const uint8_t *deflate_data = input + pos;
     size_t deflate_len = input_len - pos - 8;  // 去掉尾部8字节(CRC32+ISIZE)
     
-    ESP_LOGD(TAG, "gzip header len=%d, deflate_len=%d, output_len=%d", pos, deflate_len, *output_len);
+    ESP_LOGD(TAG, "gzip头长度=%d, 压缩长度=%d, 输出长度=%d", pos, deflate_len, *output_len);
 
     tinfl_decompressor* dec = heap_caps_malloc(sizeof(tinfl_decompressor), MALLOC_CAP_8BIT);
     if (!dec) {
-        ESP_LOGE(TAG, "failed to alloc decompressor");
+        ESP_LOGE(TAG, "分配解压器失败");
         return false;
     }
     memset(dec, 0, sizeof(tinfl_decompressor));
@@ -68,7 +69,7 @@ static bool gzip_decompress(const uint8_t* input, size_t input_len, char* output
     free(dec);
 
     if (st < TINFL_STATUS_DONE) {
-        ESP_LOGE(TAG, "decompress err: %d", st);
+        ESP_LOGE(TAG, "解压错误: %d", st);
         return false;
     }
 
@@ -76,7 +77,7 @@ static bool gzip_decompress(const uint8_t* input, size_t input_len, char* output
     size_t written = *output_len - out_rem;
     *output_len = written;
     output[written] = '\0';
-    ESP_LOGD(TAG, "decompressed %d bytes", written);
+    ESP_LOGD(TAG, "解压了 %d 字节", written);
     return true;
 }
 
@@ -122,14 +123,14 @@ static esp_err_t http_event_handler(esp_http_client_event_t* evt)
     
     switch (evt->event_id) {
         case HTTP_EVENT_ERROR:
-            ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+            ESP_LOGD(TAG, "HTTP事件错误");
             break;
         case HTTP_EVENT_ON_HEADER:
-            ESP_LOGD(TAG, "Header: %s: %s", evt->header_key, evt->header_value);
+            ESP_LOGD(TAG, "HTTP头: %s: %s", evt->header_key, evt->header_value);
             if (strcasecmp(evt->header_key, "Content-Encoding") == 0 &&
                 strcasecmp(evt->header_value, "gzip") == 0) {
                 resp_info->is_gzip = true;
-                ESP_LOGD(TAG, "Response is gzip compressed");
+                ESP_LOGD(TAG, "响应是gzip压缩的");
             }
             break;
         case HTTP_EVENT_ON_DATA:
@@ -167,7 +168,7 @@ bool weather_fetch(weather_data_t* data)
              WEATHER_API_KEY,
              WEATHER_LOCATION);
     
-    ESP_LOGD(TAG, "Fetching weather from: %s", url);
+    ESP_LOGD(TAG, "从 %s 获取天气", url);
     
     esp_http_client_config_t config = {
         .url = url,
@@ -178,11 +179,13 @@ bool weather_fetch(weather_data_t* data)
         .disable_auto_redirect = false,
         .buffer_size = 4096,
         .buffer_size_tx = 1024,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
-        ESP_LOGE(TAG, "Failed to init HTTP client");
+        ESP_LOGE(TAG, "初始化HTTP客户端失败");
         return false;
     }
     
@@ -193,14 +196,14 @@ bool weather_fetch(weather_data_t* data)
     
     esp_err_t err = esp_http_client_perform(client);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "HTTP请求失败: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return false;
     }
     
     int status_code = esp_http_client_get_status_code(client);
     if (status_code != 200) {
-        ESP_LOGE(TAG, "HTTP status code: %d", status_code);
+        ESP_LOGE(TAG, "HTTP状态码: %d", status_code);
         esp_http_client_cleanup(client);
         return false;
     }
@@ -209,14 +212,14 @@ bool weather_fetch(weather_data_t* data)
     
    // Decompress if gzip
 if (resp_info->is_gzip) {
-    ESP_LOGD(TAG, "Decompressing gzip response (%d bytes)...", resp_info->raw_len);
+    ESP_LOGD(TAG, "解压gzip响应 (%d 字节)...", resp_info->raw_len);
     size_t decompressed_len = sizeof(s_response);
     memset(response, 0, sizeof(s_response));
     if (!gzip_decompress((const uint8_t*)resp_info->raw_data, resp_info->raw_len, response, &decompressed_len)) {
-        ESP_LOGE(TAG, "Failed to decompress response");
+        ESP_LOGE(TAG, "解压响应失败");
         return false;
     }
-    ESP_LOGD(TAG, "Decompressed to %d bytes", decompressed_len);
+    ESP_LOGD(TAG, "解压到 %d 字节", decompressed_len);
 } else {
     memcpy(response, resp_info->raw_data, resp_info->raw_len);
     response[resp_info->raw_len] = '\0';
@@ -225,146 +228,72 @@ if (resp_info->is_gzip) {
     // Check API code
     char value_buf[64];
     if (!json_get_string(response, "code", value_buf, sizeof(value_buf))) {
-        ESP_LOGE(TAG, "Failed to parse API code from response");
+        ESP_LOGE(TAG, "从响应解析API代码失败");
         return false;
     }
-    ESP_LOGD(TAG, "API code: %s", value_buf);
+    ESP_LOGD(TAG, "API代码: %s", value_buf);
     if (strcmp(value_buf, "200") != 0) {
-        ESP_LOGE(TAG, "API error code: %s", value_buf);
+        ESP_LOGE(TAG, "API错误代码: %s", value_buf);
         return false;
     }
-    
+
     // Find "now" object in JSON
     const char* now_start = strstr(response, "\"now\"");
     if (!now_start) {
-        ESP_LOGE(TAG, "No 'now' object in response");
+        ESP_LOGE(TAG, "响应中没有'now'对象");
         return false;
     }
-    
+
     // Extract data from now object
     if (json_get_string(now_start, "temp", value_buf, sizeof(value_buf))) {
         data->temperature = atoi(value_buf);
     }
-    
+
     if (json_get_string(now_start, "feelsLike", value_buf, sizeof(value_buf))) {
         data->feels_like = atoi(value_buf);
     }
-    
+
     if (json_get_string(now_start, "humidity", value_buf, sizeof(value_buf))) {
         data->humidity = atoi(value_buf);
     }
-    
+
     if (json_get_string(now_start, "windSpeed", value_buf, sizeof(value_buf))) {
         data->wind_speed = atoi(value_buf);
     }
-    
+
+    if (json_get_string(now_start, "windScale", value_buf, sizeof(value_buf))) {
+        data->wind_scale = atoi(value_buf);
+    }
+
+    if (json_get_string(now_start, "pressure", value_buf, sizeof(value_buf))) {
+        data->pressure = atoi(value_buf);
+    }
+
+    if (json_get_string(now_start, "vis", value_buf, sizeof(value_buf))) {
+        data->visibility = atoi(value_buf);
+    }
+
     if (json_get_string(now_start, "text", value_buf, sizeof(value_buf))) {
         strncpy(data->weather_text, value_buf, sizeof(data->weather_text) - 1);
     }
-    
+
     if (json_get_string(now_start, "windDir", value_buf, sizeof(value_buf))) {
         strncpy(data->wind_dir, value_buf, sizeof(data->wind_dir) - 1);
     }
-    
+
     if (json_get_string(now_start, "icon", value_buf, sizeof(value_buf))) {
         data->weather_code = atoi(value_buf);
     }
-    
+
     // Get update time
     time_t now_time;
     time(&now_time);
     data->update_time = (uint32_t)now_time;
-    
-    ESP_LOGI(TAG, "Weather: %s, %dC, Humidity: %d%%",
-             data->weather_text, data->temperature, data->humidity);
-    
+
+    ESP_LOGI(TAG, "天气: %s, %d°C, 体感%d°C, 湿度%d%%, 风%s %d级, 气压%dhPa, 能见度%dkm",
+             data->weather_text, data->temperature, data->feels_like,
+             data->humidity, data->wind_dir, data->wind_scale,
+             data->pressure, data->visibility);
+
     return true;
-}
-
-const char* weather_get_text(int16_t code)
-{
-    // 和风天气天气代码转文本
-    // https://dev.qweather.com/docs/resource/icons/
-    switch (code) {
-        case 100: return "晴";
-        case 101: return "多云";
-        case 102: return "少云";
-        case 103: return "晴间多云";
-        case 104: return "阴";
-        case 200: return "有风";
-        case 201: return "平静";
-        case 202: return "微风";
-        case 300: return "阵雨";
-        case 301: return "强阵雨";
-        case 302: return "雷阵雨";
-        case 303: return "强雷阵雨";
-        case 304: return "雷阵雨伴有冰雹";
-        case 305: return "小雨";
-        case 306: return "中雨";
-        case 307: return "大雨";
-        case 308: return "极端降雨";
-        case 309: return "毛毛雨";
-        case 310: return "暴雨";
-        case 311: return "大暴雨";
-        case 312: return "特大暴雨";
-        case 313: return "冻雨";
-        case 400: return "小雪";
-        case 401: return "中雪";
-        case 402: return "大雪";
-        case 403: return "暴雪";
-        case 404: return "雨夹雪";
-        case 405: return "雨雪天气";
-        case 406: return "阵雨夹雪";
-        case 407: return "阵雪";
-        case 408: return "小到中雪";
-        case 409: return "中到大雪";
-        case 410: return "大到暴雪";
-        case 500: return "薄雾";
-        case 501: return "雾";
-        case 502: return "浓雾";
-        case 503: return "强浓雾";
-        case 504: return "轻雾";
-        case 507: return "扬沙";
-        case 508: return "浮尘";
-        case 509: return "沙尘暴";
-        case 510: return "强沙尘暴";
-        case 511: return "中度霾";
-        case 512: return "重度霾";
-        case 513: return "严重霾";
-        case 514: return "大雾";
-        case 515: return "特强浓雾";
-        default:
-            if (code >= 100 && code < 200) return "晴";
-            if (code >= 300 && code < 400) return "雨";
-            if (code >= 400 && code < 500) return "雪";
-            return "未知";
-    }
-}
-
-int weather_code_to_type(int16_t code)
-{
-    // Convert weather code to display type
-    if (code >= 100 && code < 200) {
-        if (code == 100) return 0;  // Sunny
-        return 1;  // Cloudy
-    }
-    if (code >= 300 && code < 400) {
-        if (code == 304 || code >= 306) return 4;  // Thunder
-        return 2;  // Rainy
-    }
-    if (code >= 400 && code < 500) {
-        return 3;  // Snowy
-    }
-    if (code >= 500 && code < 520) {
-        return 5;  // Foggy
-    }
-    if (code >= 520 && code < 600) {
-        return 5;  // Haze
-    }
-    return 0;  // Default to sunny
-}
-
-void weather_init(void)
-{
-    ESP_LOGI(TAG, "Weather module initialized");
 }

@@ -67,8 +67,8 @@ bool wifi_connect(void)
     
     if (default_ssid && strlen(default_ssid) > 0) {
         ESP_LOGI(TAG_WIFI, "========================================");
-        ESP_LOGI(TAG_WIFI, "Priority 1: Trying sdkconfig default WiFi");
-        ESP_LOGI(TAG_WIFI, "SSID: %s", default_ssid);
+        ESP_LOGI(TAG_WIFI, "优先级1: 尝试sdkconfig默认WiFi");
+        ESP_LOGI(TAG_WIFI, "WiFi名称: %s", default_ssid);
         
         xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT | ESPTOUCH_DONE_BIT);
         s_retry_num = 0;
@@ -88,7 +88,7 @@ bool wifi_connect(void)
         ESP_ERROR_CHECK(esp_wifi_start());
         // Note: WIFI_EVENT_STA_START will trigger esp_wifi_connect() in event handler
         
-        ESP_LOGI(TAG_WIFI, "Waiting for connection... (timeout: %d ms)", WIFI_CONNECT_TIMEOUT_MS);
+        ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
         EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                                CONNECTED_BIT | WIFI_FAIL_BIT,
                                                pdTRUE,
@@ -97,15 +97,15 @@ bool wifi_connect(void)
         
         if (bits & CONNECTED_BIT) {
             s_wifi_status = WIFI_STATUS_CONNECTED;
-            ESP_LOGI(TAG_WIFI, "SUCCESS: Connected to sdkconfig default: %s", default_ssid);
+            ESP_LOGI(TAG_WIFI, "成功: 连接到sdkconfig默认WiFi: %s", default_ssid);
             return true;
         } else {
-            ESP_LOGW(TAG_WIFI, "sdkconfig default WiFi failed, trying NVS configs...");
+            ESP_LOGW(TAG_WIFI, "sdkconfig默认WiFi失败，尝试NVS配置...");
             esp_wifi_disconnect();
             esp_wifi_stop();
         }
     } else {
-        ESP_LOGI(TAG_WIFI, "No sdkconfig default WiFi, trying NVS configs...");
+        ESP_LOGI(TAG_WIFI, "没有sdkconfig默认WiFi，尝试NVS配置...");
     }
     
     // Priority 2: Try NVS saved configurations
@@ -128,14 +128,14 @@ bool wifi_connect(void)
         strncpy((char*)wifi_config.sta.password, s_configs[i].password, sizeof(wifi_config.sta.password));
         
         ESP_LOGI(TAG_WIFI, "========================================");
-        ESP_LOGI(TAG_WIFI, "Priority 2: Trying NVS config %d: %s", i, s_configs[i].ssid);
+        ESP_LOGI(TAG_WIFI, "优先级2: 尝试NVS配置 %d: %s", i, s_configs[i].ssid);
         
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
         ESP_ERROR_CHECK(esp_wifi_start());
         // Note: WIFI_EVENT_STA_START will trigger esp_wifi_connect() in event handler
         
-        ESP_LOGI(TAG_WIFI, "Waiting for connection... (timeout: %d ms)", WIFI_CONNECT_TIMEOUT_MS);
+        ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
         EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                                CONNECTED_BIT | WIFI_FAIL_BIT,
                                                pdTRUE,
@@ -144,12 +144,12 @@ bool wifi_connect(void)
         
         if (bits & CONNECTED_BIT) {
             s_wifi_status = WIFI_STATUS_CONNECTED;
-            ESP_LOGI(TAG_WIFI, "SUCCESS: Connected to NVS config: %s", s_configs[i].ssid);
+            ESP_LOGI(TAG_WIFI, "成功: 连接到NVS配置: %s", s_configs[i].ssid);
             return true;
         } else if (bits & WIFI_FAIL_BIT) {
-            ESP_LOGW(TAG_WIFI, "FAILED: Max retries reached for: %s", s_configs[i].ssid);
+            ESP_LOGW(TAG_WIFI, "失败: 达到最大重试次数: %s", s_configs[i].ssid);
         } else {
-            ESP_LOGW(TAG_WIFI, "TIMEOUT: No response from: %s", s_configs[i].ssid);
+            ESP_LOGW(TAG_WIFI, "超时: 无响应: %s", s_configs[i].ssid);
         }
         
         esp_wifi_disconnect();
@@ -157,7 +157,7 @@ bool wifi_connect(void)
     }
     
     if (!has_nvs_config) {
-        ESP_LOGW(TAG_WIFI, "No NVS WiFi configs found");
+        ESP_LOGW(TAG_WIFI, "未找到NVS WiFi配置");
     }
     
     s_wifi_status = WIFI_STATUS_DISCONNECTED;
@@ -249,22 +249,6 @@ int wifi_load_configs(wifi_manager_config_t* configs, int max_count)
     return loaded;
 }
 
-void wifi_clear_configs(void)
-{
-    nvs_handle_t nvs_handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        for (int i = 0; i < WIFI_MAX_CONFIGS; i++) {
-            char key[16];
-            snprintf(key, sizeof(key), "%s%d", NVS_KEY_WIFI_PREFIX, i);
-            nvs_erase_key(nvs_handle, key);
-        }
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    }
-    
-    memset(s_configs, 0, sizeof(s_configs));
-}
-
 bool wifi_start_smartconfig(void)
 {
     s_smartconfig_active = true;
@@ -318,24 +302,19 @@ void wifi_stop_smartconfig(void)
     s_smartconfig_active = false;
 }
 
-bool wifi_is_config_mode(void)
-{
-    return s_smartconfig_active;
-}
-
 void wifi_event_handler(void* arg, esp_event_base_t event_base,
                        int32_t event_id, void* event_data)
 {
     if (event_base == WIFI_EVENT) {
         switch (event_id) {
             case WIFI_EVENT_STA_START:
-                ESP_LOGI(TAG_WIFI, "WiFi STA started, connecting...");
+                ESP_LOGI(TAG_WIFI, "WiFi STA已启动，连接中...");
                 esp_wifi_connect();
                 break;
             case WIFI_EVENT_STA_DISCONNECTED:
                 {
                     wifi_event_sta_disconnected_t* event = (wifi_event_sta_disconnected_t*)event_data;
-                    ESP_LOGW(TAG_WIFI, "Disconnected from %s, reason: %d", 
+                    ESP_LOGW(TAG_WIFI, "从 %s 断开连接, 原因: %d", 
                              event->ssid, event->reason);
                     
                     if (s_smartconfig_active) {
@@ -344,12 +323,12 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                     } else {
                         // Normal mode: retry connection
                         if (s_retry_num < WIFI_MAX_RETRY) {
-                            ESP_LOGI(TAG_WIFI, "Retry connecting (%d/%d)...", 
+                            ESP_LOGI(TAG_WIFI, "重试连接 (%d/%d)...", 
                                      s_retry_num + 1, WIFI_MAX_RETRY);
                             esp_wifi_connect();
                             s_retry_num++;
                         } else {
-                            ESP_LOGW(TAG_WIFI, "Max retries reached, connection failed");
+                            ESP_LOGW(TAG_WIFI, "达到最大重试次数，连接失败");
                             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
                             s_wifi_status = WIFI_STATUS_DISCONNECTED;
                         }
@@ -357,7 +336,7 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 }
                 break;
             case WIFI_EVENT_STA_CONNECTED:
-                ESP_LOGI(TAG_WIFI, "Connected to AP, waiting for IP...");
+                ESP_LOGI(TAG_WIFI, "已连接到AP，等待IP...");
                 break;
             default:
                 break;
@@ -365,7 +344,7 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT) {
         if (event_id == IP_EVENT_STA_GOT_IP) {
             ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-            ESP_LOGI(TAG_WIFI, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+            ESP_LOGI(TAG_WIFI, "获取到IP: " IPSTR, IP2STR(&event->ip_info.ip));
             s_retry_num = 0;
             xEventGroupSetBits(s_wifi_event_group, CONNECTED_BIT);
             s_wifi_status = WIFI_STATUS_CONNECTED;
@@ -373,13 +352,13 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
     } else if (event_base == SC_EVENT) {
         switch (event_id) {
             case SC_EVENT_SCAN_DONE:
-                ESP_LOGI("SmartConfig", "Scan done");
+                ESP_LOGI("SmartConfig", "扫描完成");
                 break;
             case SC_EVENT_FOUND_CHANNEL:
-                ESP_LOGI("SmartConfig", "Found channel");
+                ESP_LOGI("SmartConfig", "找到信道");
                 break;
             case SC_EVENT_GOT_SSID_PSWD:
-                ESP_LOGI("SmartConfig", "Got SSID and password from 一键配网");
+                ESP_LOGI("SmartConfig", "从一键配网获取到SSID和密码");
                 
                 smartconfig_event_got_ssid_pswd_t* evt = (smartconfig_event_got_ssid_pswd_t*)event_data;
                 wifi_config_t config = {0};
@@ -391,7 +370,7 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 memcpy(config.sta.ssid, evt->ssid, sizeof(config.sta.ssid));
                 memcpy(config.sta.password, evt->password, sizeof(config.sta.password));
                 
-                ESP_LOGI("SmartConfig", "SSID: %s", config.sta.ssid);
+                ESP_LOGI("SmartConfig", "WiFi名称: %s", config.sta.ssid);
                 
                 ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
                 

@@ -71,11 +71,6 @@ bool wifi_save_config(const char* ssid, const char* password);
 int wifi_load_configs(wifi_manager_config_t* configs, int max_count);
 
 /**
- * @brief Clear all saved WiFi configurations
- */
-void wifi_clear_configs(void);
-
-/**
  * @brief Start SmartConfig provisioning
  * @return true if started successfully
  */
@@ -85,12 +80,6 @@ bool wifi_start_smartconfig(void);
  * @brief Stop SmartConfig provisioning
  */
 void wifi_stop_smartconfig(void);
-
-/**
- * @brief Check if SmartConfig is active
- * @return true if in config mode
- */
-bool wifi_is_config_mode(void);
 
 /**
  * @brief WiFi event handler (call from app_main)

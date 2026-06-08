@@ -10,7 +10,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
-static const char* TAG = "Button";
+static const char* TAG = "按键";
 
 static const button_config_t button_configs[BUTTON_MAX] = {
     [BUTTON_WAKE] = {

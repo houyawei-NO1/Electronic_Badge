@@ -6,11 +6,7 @@
 #include "power.h"
 #include "config.h"
 #include "driver/gpio.h"
-#include "driver/rtc_io.h"
 #include "esp_sleep.h"
-#include "esp_system.h"
-#include "soc/rtc.h"
-#include "soc/rtc_cntl_reg.h"
 
 static RTC_NOINIT_ATTR uint8_t rtc_backup_data[256];
 
