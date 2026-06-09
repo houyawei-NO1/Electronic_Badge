@@ -13,7 +13,7 @@ idf_component_register(
          "ui/src/ui/vars.c"
          "ui/src/ui/fonts/fonts.c"
     INCLUDE_DIRS "include" "ui/src/ui" "ui/src/ui/fonts"
-    REQUIRES driver esp_wifi esp_http_client esp_event nvs_flash spiffs esp_netif esp_rom esp_lcd mbedtls lvgl
+    REQUIRES driver esp_wifi esp_http_client esp_event nvs_flash esp_netif esp_rom esp_lcd mbedtls lvgl
 )
 
 # Force UTF-8 encoding for Chinese characters in source files

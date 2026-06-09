@@ -132,7 +132,6 @@ static void enter_display_mode(void)
                 if (weather_fetch(&s_weather_data)) {
                     s_rtc_data.weather_code = s_weather_data.weather_code;
                     s_rtc_data.temperature = s_weather_data.temperature;
-                    s_rtc_data.feels_like = s_weather_data.feels_like;
                     s_rtc_data.humidity = s_weather_data.humidity;
                     s_rtc_data.wind_scale = s_weather_data.wind_scale;
                     s_rtc_data.last_update_timestamp = s_weather_data.update_time;
@@ -183,7 +182,6 @@ static void enter_display_mode(void)
                     if (weather_fetch(&s_weather_data)) {
                         s_rtc_data.weather_code = s_weather_data.weather_code;
                         s_rtc_data.temperature = s_weather_data.temperature;
-                        s_rtc_data.feels_like = s_weather_data.feels_like;
                         s_rtc_data.humidity = s_weather_data.humidity;
                         s_rtc_data.wind_scale = s_weather_data.wind_scale;
                         s_rtc_data.last_update_timestamp = s_weather_data.update_time;
@@ -238,10 +236,17 @@ static void enter_display_mode(void)
         }
     }
     
-    // Cleanup before sleep
+    // 进入休眠前：不断开显示，而是显示屏保
+    // 硬件限制无法关闭背光，关闭显示没有意义，保持屏保显示
     button_reset();
-    display_backlight_off();
-    display_deinit();
+
+    // 获取当前时间用于屏保（复用函数开头声明的 now / tm_info）
+    time(&now);
+    tm_info = localtime(&now);
+    display_screensaver(tm_info->tm_hour, tm_info->tm_min);
+
+    // 给屏保一点时间渲染
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     // 进入休眠前断开WiFi，降低功耗
     if (wifi_is_connected()) {
@@ -319,7 +324,6 @@ static bool enter_update_mode(bool* out_wifi_failed)
         // Update RTC data
         s_rtc_data.weather_code = s_weather_data.weather_code;
         s_rtc_data.temperature = s_weather_data.temperature;
-        s_rtc_data.feels_like = s_weather_data.feels_like;
         s_rtc_data.humidity = s_weather_data.humidity;
         s_rtc_data.wind_scale = s_weather_data.wind_scale;
         s_rtc_data.last_update_timestamp = s_weather_data.update_time;

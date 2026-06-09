@@ -376,22 +376,60 @@ static void label_breathe_anim_cb(void *var, int32_t v)
 }
 
 // =============================================================================
-// Weather icon float animation callback
+// Weather icon animation callbacks
 // =============================================================================
+
+// 上下浮动动画（默认）
 static void icon_float_anim_cb(void *var, int32_t v)
 {
     lv_obj_t *obj = (lv_obj_t *)var;
     lv_obj_set_y(obj, v);
 }
 
-// =============================================================================
+// 左右移动动画（云彩类）
+static void icon_sway_anim_cb(void *var, int32_t v)
+{
+    lv_obj_t *obj = (lv_obj_t *)var;
+    lv_obj_set_x(obj, v);
+}
+
+// 旋转动画（中心对称类）
+static void icon_rotate_anim_cb(void *var, int32_t v)
+{
+    lv_obj_t *obj = (lv_obj_t *)var;
+    lv_img_set_angle(obj, v);
+}
+
 // Arc rotation animation callback
-// =============================================================================
 static void arc_rotation_anim_cb(void *var, int32_t v)
 {
     lv_obj_t *obj = (lv_obj_t *)var;
     lv_arc_set_rotation(obj, v);
 }
+
+// =============================================================================
+// 根据天气代码判断动画类型
+// =============================================================================
+// 旋转动画：只有 100(晴) 和 499
+static bool is_rotating_icon(int16_t code)
+{
+    return (code == 100 || code == 499);
+}
+
+// 左右移动动画：所有带云彩的图形
+static bool is_swaying_icon(int16_t code)
+{
+    return ((code >= 101 && code <= 104) ||   // 多云/阴
+            (code == 151) ||                   // 晴间多云(夜间)
+            (code >= 300 && code <= 313) ||   // 各种雨
+            (code >= 400 && code <= 403) ||   // 小雪/中雪/大雪/暴雪
+            (code >= 407 && code <= 410) ||   // 阵雪/小到中雪/中到大雪/大到暴雪
+            (code >= 500 && code <= 515) ||   // 雾/霾
+            (code == 350) || (code == 351));  // 特殊阵雨
+}
+
+// 上下浮动动画：其他（雷暴等）
+// 默认就是浮动，不需要额外判断
 
 void display_main_screen(int hour, int minute, const char* weather_text,
                          int temperature, uint32_t last_update, int16_t weather_code,
@@ -507,19 +545,41 @@ void display_main_screen(int hour, int minute, const char* weather_text,
         ESP_LOGI(TAG, "[动画] label_update 呼吸动画已启动 (1秒周期)");
     }
 
-    // 天气图标浮动动画：先清除旧动画，再启动新的
+    // 天气图标动画：根据天气类型选择不同动画效果
     if (objects.qweather_icons) {
+        // 先清除所有可能的旧动画
         lv_anim_del(objects.qweather_icons, icon_float_anim_cb);
+        lv_anim_del(objects.qweather_icons, icon_sway_anim_cb);
+        lv_anim_del(objects.qweather_icons, icon_rotate_anim_cb);
+
         lv_anim_t a;
         lv_anim_init(&a);
         lv_anim_set_var(&a, objects.qweather_icons);
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)icon_float_anim_cb);
-        lv_anim_set_values(&a, 80, 86);  // y: 80 -> 86 -> 80 (±3px float)
-        lv_anim_set_time(&a, 2000);
-        lv_anim_set_playback_time(&a, 2000);
         lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+
+        if (is_rotating_icon(weather_code)) {
+            // 旋转动画：中心对称图形（晴、雪）
+            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)icon_rotate_anim_cb);
+            lv_anim_set_values(&a, 0, 3600);  // 0° -> 360° (LVGL角度单位是0.1度)
+            lv_anim_set_time(&a, 8000);       // 8秒转一圈，缓慢优雅
+            ESP_LOGI(TAG, "[动画] 天气图标旋转已启动 (8秒周期, code=%d)", weather_code);
+        } else if (is_swaying_icon(weather_code)) {
+            // 左右移动动画：带云彩的图形
+            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)icon_sway_anim_cb);
+            lv_anim_set_values(&a, 91, 97);   // x: 91 -> 97 -> 91 (±3px)
+            lv_anim_set_time(&a, 3000);       // 3秒一个来回
+            lv_anim_set_playback_time(&a, 3000);
+            ESP_LOGI(TAG, "[动画] 天气图标左右移动已启动 (6秒周期, code=%d)", weather_code);
+        } else {
+            // 上下浮动动画：其他图形（雷暴等）
+            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)icon_float_anim_cb);
+            lv_anim_set_values(&a, 80, 86);   // y: 80 -> 86 -> 80 (±3px)
+            lv_anim_set_time(&a, 2000);       // 2秒一个来回
+            lv_anim_set_playback_time(&a, 2000);
+            ESP_LOGI(TAG, "[动画] 天气图标上下浮动已启动 (4秒周期, code=%d)", weather_code);
+        }
+
         lv_anim_start(&a);
-        ESP_LOGI(TAG, "[动画] 天气图标浮动已启动 (4秒周期)");
     }
 
     lvgl_port_unlock();
@@ -642,6 +702,45 @@ void display_config_success(void)
     }
 
     lvgl_port_unlock();
+}
+
+// =============================================================================
+// display_screensaver - Show simple clock before sleep
+// =============================================================================
+void display_screensaver(int hour, int minute)
+{
+    if (!is_initialized || !disp_handle) return;
+
+    lvgl_port_lock(0);
+
+    // 获取当前屏幕并清空
+    lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
+    lv_obj_clean(scr);
+
+    // 黑色背景
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    // 大号时间显示（48px，需在 sdkconfig 中启用 LV_FONT_MONTSERRAT_48）
+    lv_obj_t *label_time = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_time, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(label_time, lv_color_white(), 0);
+    lv_obj_align(label_time, LV_ALIGN_CENTER, 0, -15);
+
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", hour, minute);
+    lv_label_set_text(label_time, buf);
+
+    // 底部小字提示
+    lv_obj_t *label_hint = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_hint, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(label_hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_align(label_hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_label_set_text(label_hint, "Press WAKE");
+
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "屏保已显示: %02d:%02d", hour, minute);
 }
 
 // =============================================================================

@@ -85,7 +85,7 @@ void create_screen_badge_main() {
                     // label_temp — 右半边水平居中 (x=120~240)
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.label_temp = obj;
-                    lv_obj_set_pos(obj, 120, 134);
+                    lv_obj_set_pos(obj, 120, 136);
                     lv_obj_set_size(obj, 120, LV_SIZE_CONTENT);
                     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_label_set_text(obj, "25度");

@@ -69,6 +69,14 @@ void display_config_mode(void);
 void display_config_success(void);
 
 /**
+ * @brief Display screensaver before sleep
+ * Shows a simple clock or pattern to prevent screen burn-in
+ * @param hour Hour (0-23)
+ * @param minute Minute (0-59)
+ */
+void display_screensaver(int hour, int minute);
+
+/**
  * @brief Deinitialize display
  */
 void display_deinit(void);

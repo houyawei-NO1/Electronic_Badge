@@ -116,7 +116,6 @@ typedef struct {
     uint32_t last_update_timestamp;
     int16_t weather_code;
     int8_t temperature;
-    int8_t feels_like;
     uint8_t humidity;
     uint8_t wind_scale;      // 风力等级
     char weather_text[16];

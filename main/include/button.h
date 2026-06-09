@@ -13,7 +13,6 @@ typedef enum {
     BUTTON_EVENT_NONE = 0,
     BUTTON_EVENT_PRESS,       // Short press
     BUTTON_EVENT_LONG_PRESS,  // Long press (> defined threshold)
-    BUTTON_EVENT_RELEASE,
 } button_event_t;
 
 // Button IDs

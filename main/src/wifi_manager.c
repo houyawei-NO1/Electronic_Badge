@@ -17,8 +17,7 @@ static bool s_smartconfig_active = false;
 static bool s_wifi_initialized = false;
 static EventGroupHandle_t s_wifi_event_group;
 static const int CONNECTED_BIT = BIT0;
-static const int ESPTOUCH_DONE_BIT = BIT1;
-static const int WIFI_FAIL_BIT = BIT2;
+static const int WIFI_FAIL_BIT = BIT1;
 static int s_retry_num = 0;
 static const char *TAG_WIFI = "WiFi";
 
@@ -70,7 +69,7 @@ bool wifi_connect(void)
         ESP_LOGI(TAG_WIFI, "优先级1: 尝试sdkconfig默认WiFi");
         ESP_LOGI(TAG_WIFI, "WiFi名称: %s", default_ssid);
         
-        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT | ESPTOUCH_DONE_BIT);
+        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT);
         s_retry_num = 0;
         
         wifi_config_t wifi_config = {
@@ -113,8 +112,8 @@ bool wifi_connect(void)
     for (int i = 0; i < WIFI_MAX_CONFIGS; i++) {
         if (!s_configs[i].valid) continue;
         has_nvs_config = true;
-        
-        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT | ESPTOUCH_DONE_BIT);
+
+        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT);
         s_retry_num = 0;
         
         wifi_config_t wifi_config = {
@@ -376,9 +375,6 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 
                 // Save the new config
                 wifi_save_config((char*)config.sta.ssid, (char*)config.sta.password);
-                break;
-            case SC_EVENT_SEND_ACK_DONE:
-                xEventGroupSetBits(s_wifi_event_group, ESPTOUCH_DONE_BIT);
                 break;
             default:
                 break;
