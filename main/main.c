@@ -1,15 +1,28 @@
 /**
  * @file main.c
  * @brief 电子吧唧 - Electronic Badge Main Program
- * 
+ *
  * Features:
  * - Display time and weather
  * - Weather icons from local resources
- * - Deep sleep for low power consumption
+ * - Low-power mode (light sleep) with 1-minute time refresh
  * - SmartConfig for WiFi provisioning (use WeChat Mini Program "一键配网")
+ *
+ * [POWER MODE]
+ * Light sleep is used instead of deep sleep because the RST pin (GPIO5)
+ * is shared with the backlight. Deep sleep would pull GPIO5 low, resetting
+ * the GC9A01 controller and requiring full re-initialization on wakeup.
+ *
+ * In light sleep:
+ *   - CPU halts, RAM is retained
+ *   - GPIO states preserved (backlight stays on)
+ *   - Screen content remains visible
+ *   - Wake up every minute to refresh the time
+ *   - WiFi stays off to save power
  */
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -27,413 +40,366 @@
 
 static const char* TAG = "主程序";
 
-// Global state
-static rtc_data_t s_rtc_data = {0};
+// Global state (retained in RAM during light sleep)
 static weather_data_t s_weather_data = {0};
-static bool s_has_rtc_data = false;
+static bool s_has_weather = false;
+static uint32_t s_last_weather_update = 0;  // epoch seconds
+static uint32_t s_boot_count = 0;
 
 // =============================================================================
-// NTP Time Sync
+// Helper: format update-time string
 // =============================================================================
-static void sync_time(void)
+static void format_update_time(char* buf, size_t buf_size, uint32_t timestamp)
 {
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER_1);
-    config.smooth_sync = false;
-    esp_netif_sntp_init(&config);
-    
-    // Wait for time sync
-    int retry = 0;
-    while (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) == ESP_ERR_TIMEOUT && retry < 5) {
-        ESP_LOGI(TAG, "等待系统时间同步... (%d/%d)", retry + 1, 5);
-        retry++;
+    time_t ts = (time_t)timestamp;
+    if (ts > 1577836800UL) {
+        struct tm* tm_info = localtime(&ts);
+        snprintf(buf, buf_size, "%02d:%02d 已更新",
+                 tm_info->tm_hour, tm_info->tm_min);
+    } else {
+        strncpy(buf, "未更新", buf_size);
+        buf[buf_size - 1] = '\0';
     }
-    
-    esp_netif_sntp_deinit();
-    
-    // Set timezone to China Standard Time (CST-8)
-    setenv("TZ", "CST-8", 1);
-    tzset();
-    
-    time_t now;
-    time(&now);
-    struct tm* tm_info = localtime(&now);
-    ESP_LOGI(TAG, "当前时间: %02d:%02d:%02d", 
-             tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
 }
 
 // =============================================================================
-// Mode Handlers
+// Helper: check if system time is valid (year >= 2020)
+// =============================================================================
+static bool system_time_valid(void)
+{
+    time_t now;
+    time(&now);
+    struct tm* tm_info = localtime(&now);
+    return (tm_info->tm_year + 1900) >= 2020;
+}
+
+// =============================================================================
+// Helper: sync system time via SNTP
+// =============================================================================
+static void sync_time(void)
+{
+    ESP_LOGI(TAG, "正在同步NTP时间...");
+    esp_sntp_config_t sntp_conf = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&sntp_conf);
+
+    int retry = 0;
+    while (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(1000)) != ESP_OK && retry < 10) {
+        retry++;
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    esp_netif_sntp_deinit();
+
+    if (retry < 10) {
+        time_t now;
+        time(&now);
+        struct tm* tm_info = localtime(&now);
+        ESP_LOGI(TAG, "NTP同步成功: %04d-%02d-%02d %02d:%02d:%02d",
+                 tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
+                 tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+    } else {
+        ESP_LOGW(TAG, "NTP同步超时");
+    }
+}
+
+// =============================================================================
+// Helper: set system time from epoch seconds
+// =============================================================================
+static void set_system_time_from_epoch(uint32_t epoch)
+{
+    struct timeval tv = {
+        .tv_sec = (time_t)epoch,
+        .tv_usec = 0,
+    };
+    settimeofday(&tv, NULL);
+    ESP_LOGI(TAG, "系统时间已设置: epoch=%lu", (unsigned long)epoch);
+}
+
+// =============================================================================
+// Mode: Active Display (user viewing the screen)
 // =============================================================================
 static void enter_display_mode(void)
 {
     ESP_LOGI(TAG, "=== 显示模式 ===");
 
-    // Load RTC data
-    power_load_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
-    s_has_rtc_data = s_rtc_data.boot_count > 0;
-
-    // Initialize display
-    display_init();
+    // Initialize display (first time) or ensure it's on
+    if (!display_is_initialized()) {
+        if (display_init() != ESP_OK) {
+            ESP_LOGE(TAG, "显示初始化失败");
+            return;
+        }
+    }
     display_backlight_on();
 
     // Initialize button handler
     button_init();
 
-    // 如果刚从enter_update_mode过来，显示已经初始化且数据已刷新
-    // 但为了确保时间最新，还是刷新一次主界面
+    // Show main screen with current data
     time_t now;
     time(&now);
     struct tm* tm_info = localtime(&now);
-    display_main_screen(tm_info->tm_hour, tm_info->tm_min,
-                       s_has_rtc_data ? s_rtc_data.weather_text : "晴",
-                       s_has_rtc_data ? s_rtc_data.temperature : 25,
-                       s_rtc_data.last_update_timestamp,
-                       s_has_rtc_data ? s_rtc_data.weather_code : 100,
-                       s_has_rtc_data ? s_rtc_data.humidity : 0,
-                       s_has_rtc_data ? s_rtc_data.wind_scale : 0);
+    char update_str[32] = {0};
+    format_update_time(update_str, sizeof(update_str), s_last_weather_update);
 
-    // Start display timeout counter
+    display_main_screen(
+        tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+        s_has_weather ? s_weather_data.weather_code : 100,
+        s_has_weather ? s_weather_data.weather_text : "晴",
+        s_has_weather ? s_weather_data.temperature : 25,
+        s_has_weather ? s_weather_data.humidity : 0,
+        s_has_weather ? s_weather_data.wind_scale : 0,
+        update_str);
+
+    // Main loop: handle buttons for DISPLAY_TIMEOUT seconds
     uint32_t timeout_counter = 0;
-    
-    // Main loop
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(100));
         timeout_counter += 100;
 
-        // PicoPixel UI tick (for animations)
         ui_tick();
-        
-        // Check WAKE button (long press = sleep)
+
+        // WAKE button long press -> exit to low power mode
         if (button_is_pressed(BUTTON_WAKE)) {
             button_event_t event = button_get_event(BUTTON_WAKE);
             if (event == BUTTON_EVENT_LONG_PRESS) {
-                ESP_LOGI(TAG, "长按WAKE键，进入休眠");
-                // Wait for button release before entering sleep
-                // Otherwise GPIO stays low and immediately wakes from deep sleep
-                ESP_LOGI(TAG, "等待WAKE键释放...");
+                ESP_LOGI(TAG, "长按WAKE键，进入低功耗模式");
                 while (button_is_pressed(BUTTON_WAKE)) {
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
-                ESP_LOGI(TAG, "WAKE键已释放，进入深度休眠");
                 break;
             }
         }
-        
-        // Check REFRESH button
+
+        // REFRESH button short press -> update weather
         button_event_t refresh_event = button_get_event(BUTTON_REFRESH);
         if (refresh_event == BUTTON_EVENT_PRESS) {
-            ESP_LOGI(TAG, "短按REFRESH键，手动更新");
-
-            // 如果WiFi已连接，直接获取天气，无需重新连接
-            if (wifi_is_connected()) {
-                ESP_LOGI(TAG, "WiFi已连接，直接获取天气");
-                // 静默获取天气并更新屏幕
-                memset(&s_weather_data, 0, sizeof(s_weather_data));
+            ESP_LOGI(TAG, "短按REFRESH键，手动更新天气");
+            if (wifi_connect()) {
+                sync_time();
                 if (weather_fetch(&s_weather_data)) {
-                    s_rtc_data.weather_code = s_weather_data.weather_code;
-                    s_rtc_data.temperature = s_weather_data.temperature;
-                    s_rtc_data.humidity = s_weather_data.humidity;
-                    s_rtc_data.wind_scale = s_weather_data.wind_scale;
-                    s_rtc_data.last_update_timestamp = s_weather_data.update_time;
-                    strncpy(s_rtc_data.weather_text, s_weather_data.weather_text,
-                            sizeof(s_rtc_data.weather_text) - 1);
-                    s_has_rtc_data = true;
-                    power_save_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
+                    s_has_weather = true;
+                    s_last_weather_update = s_weather_data.update_time;
 
-                    time_t now;
                     time(&now);
-                    struct tm* tm_info = localtime(&now);
-                    display_main_screen(tm_info->tm_hour, tm_info->tm_min,
-                                       s_weather_data.weather_text,
-                                       s_weather_data.temperature,
-                                       s_weather_data.update_time,
-                                       s_weather_data.weather_code,
-                                       s_weather_data.humidity,
-                                       s_weather_data.wind_scale);
+                    tm_info = localtime(&now);
+                    format_update_time(update_str, sizeof(update_str), s_last_weather_update);
+                    display_main_screen(
+                        tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+                        s_weather_data.weather_code, s_weather_data.weather_text,
+                        s_weather_data.temperature, s_weather_data.humidity,
+                        s_weather_data.wind_scale, update_str);
                     ESP_LOGI(TAG, "天气更新成功");
                 } else {
-                    ESP_LOGW(TAG, "天气获取失败，保持缓存数据");
+                    ESP_LOGW(TAG, "天气获取失败");
                 }
+                wifi_disconnect();
             } else {
-                // WiFi未连接，需要重新连接
-                display_loading("正在配置WIF");
-
-                if (wifi_connect()) {
-                    display_loading_status("正在同步");
-                    sync_time();
-
-                    // Show main screen immediately with cached RTC data
-                    {
-                        time_t now;
-                        time(&now);
-                        struct tm* tm_info = localtime(&now);
-                        display_main_screen(
-                            tm_info->tm_hour, tm_info->tm_min,
-                            s_has_rtc_data ? s_rtc_data.weather_text : "晴",
-                            s_has_rtc_data ? s_rtc_data.temperature : 25,
-                            s_rtc_data.last_update_timestamp,
-                            s_has_rtc_data ? s_rtc_data.weather_code : 100,
-                            s_has_rtc_data ? s_rtc_data.humidity : 0,
-                            s_has_rtc_data ? s_rtc_data.wind_scale : 0);
-                    }
-
-                    // Fetch weather and silently update the screen
-                    memset(&s_weather_data, 0, sizeof(s_weather_data));
-                    if (weather_fetch(&s_weather_data)) {
-                        s_rtc_data.weather_code = s_weather_data.weather_code;
-                        s_rtc_data.temperature = s_weather_data.temperature;
-                        s_rtc_data.humidity = s_weather_data.humidity;
-                        s_rtc_data.wind_scale = s_weather_data.wind_scale;
-                        s_rtc_data.last_update_timestamp = s_weather_data.update_time;
-                        strncpy(s_rtc_data.weather_text, s_weather_data.weather_text,
-                                sizeof(s_rtc_data.weather_text) - 1);
-                        s_has_rtc_data = true;
-                        power_save_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
-
-                        time_t now;
-                        time(&now);
-                        struct tm* tm_info = localtime(&now);
-                        display_main_screen(tm_info->tm_hour, tm_info->tm_min,
-                                           s_weather_data.weather_text,
-                                           s_weather_data.temperature,
-                                           s_weather_data.update_time,
-                                           s_weather_data.weather_code,
-                                           s_weather_data.humidity,
-                                           s_weather_data.wind_scale);
-                        ESP_LOGI(TAG, "天气更新成功");
-                    } else {
-                        ESP_LOGW(TAG, "天气获取失败，保持缓存数据");
-                    }
-                } else {
-                    ESP_LOGW(TAG, "手动更新WiFi连接失败");
-                    display_loading("WiFi ERROR");
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                    // Restore main screen
-                    time_t now;
-                    time(&now);
-                    struct tm* tm_info = localtime(&now);
-                    display_main_screen(tm_info->tm_hour, tm_info->tm_min,
-                                       s_has_rtc_data ? s_rtc_data.weather_text : "晴",
-                                       s_has_rtc_data ? s_rtc_data.temperature : 25,
-                                       s_rtc_data.last_update_timestamp,
-                                       s_has_rtc_data ? s_rtc_data.weather_code : 100,
-                                       s_has_rtc_data ? s_rtc_data.humidity : 0,
-                                       s_has_rtc_data ? s_rtc_data.wind_scale : 0);
-                }
+                ESP_LOGW(TAG, "WiFi连接失败");
+                display_loading("WiFi ERROR");
+                vTaskDelay(pdMS_TO_TICKS(1000));
             }
-
-            timeout_counter = 0;
-        } else if (refresh_event == BUTTON_EVENT_LONG_PRESS) {
+            timeout_counter = 0;  // Reset timeout after interaction
+        }
+        // REFRESH button long press -> enter config mode
+        else if (refresh_event == BUTTON_EVENT_LONG_PRESS) {
             ESP_LOGI(TAG, "长按REFRESH键，进入配网模式");
             display_config_mode();
             vTaskDelay(pdMS_TO_TICKS(3000));
+            // Return to display mode after showing config screen
+            timeout_counter = 0;
         }
-        
-        // Check timeout
+
+        // Timeout -> exit to low power mode
         if (timeout_counter >= DISPLAY_TIMEOUT * 1000) {
-            ESP_LOGI(TAG, "显示超时，进入休眠");
+            ESP_LOGI(TAG, "显示超时，进入低功耗模式");
             break;
         }
     }
-    
-    // 进入休眠前：不断开显示，而是显示屏保
-    // 硬件限制无法关闭背光，关闭显示没有意义，保持屏保显示
-    button_reset();
 
-    // 获取当前时间用于屏保（复用函数开头声明的 now / tm_info）
+    button_reset();
+}
+
+// =============================================================================
+// Mode: Low Power (light sleep, screen shows screensaver)
+// =============================================================================
+static void enter_low_power_mode(void)
+{
+    ESP_LOGI(TAG, "=== 低功耗模式 ===");
+
+    // Show screensaver with current time
+    time_t now;
     time(&now);
-    tm_info = localtime(&now);
+    struct tm* tm_info = localtime(&now);
     display_screensaver(tm_info->tm_hour, tm_info->tm_min);
 
-    // 给屏保一点时间渲染
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // 进入休眠前断开WiFi，降低功耗
+    // Ensure WiFi is disconnected in low power mode
     if (wifi_is_connected()) {
-        ESP_LOGI(TAG, "休眠前断开WiFi");
+        ESP_LOGI(TAG, "低功耗模式: 断开WiFi");
         wifi_disconnect();
+    }
+
+    // Light sleep loop: wake up every minute to refresh time
+    while (1) {
+        bool timer_wakeup = power_enter_low_power_mode(LIGHT_SLEEP_INTERVAL_US);
+
+        if (!timer_wakeup) {
+            // GPIO wakeup (button pressed) -> enter active display mode
+            ESP_LOGI(TAG, "按键唤醒，进入显示模式");
+            return;  // Caller will enter display mode
+        }
+
+        // Timer wakeup -> refresh screensaver time
+        time(&now);
+        tm_info = localtime(&now);
+
+        // Only refresh if minute changed (avoid unnecessary redraw)
+        static int last_minute = -1;
+        if (tm_info->tm_min != last_minute) {
+            last_minute = tm_info->tm_min;
+            display_screensaver(tm_info->tm_hour, tm_info->tm_min);
+            ESP_LOGI(TAG, "屏保刷新: %02d:%02d", tm_info->tm_hour, tm_info->tm_min);
+        }
+
+        // Check if weather data is stale (> 30 min) and needs update
+        // (Only check, don't update here - update happens when user enters display mode)
+        time_t now_sec = time(NULL);
+        if (s_has_weather &&
+            (now_sec - (time_t)s_last_weather_update) > (30 * 60)) {
+            ESP_LOGI(TAG, "天气数据已过期 (>30分钟)，下次进入显示模式时更新");
+        }
     }
 }
 
-static bool enter_update_mode(bool* out_wifi_failed)
+// =============================================================================
+// Mode: Weather Update (connect WiFi, fetch weather, then display)
+// =============================================================================
+static bool enter_update_mode(void)
 {
     ESP_LOGI(TAG, "=== 更新模式 ===");
-    
-    if (out_wifi_failed) {
-        *out_wifi_failed = false;
+
+    if (!display_is_initialized()) {
+        if (display_init() != ESP_OK) {
+            ESP_LOGE(TAG, "显示初始化失败");
+            return false;
+        }
     }
-    
-    // Initialize display for update progress
-    display_init();
     display_backlight_on();
     display_loading("正在配置WIF");
-    
-    // Load RTC data
-    bool rtc_valid = power_load_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
-    if (!rtc_valid) {
-        ESP_LOGI(TAG, "RTC数据无效，已初始化为零");
-        s_has_rtc_data = false;
-    } else {
-        s_has_rtc_data = true;
-        ESP_LOGI(TAG, "RTC数据已加载: code=%d temp=%d",
-                 s_rtc_data.weather_code, s_rtc_data.temperature);
-    }
-    s_rtc_data.boot_count++;
-    
+
     // Connect to WiFi
     display_loading_status("正在配置WIF");
     if (!wifi_connect()) {
         ESP_LOGW(TAG, "WiFi连接失败");
         display_loading("WiFi ERROR");
         vTaskDelay(pdMS_TO_TICKS(1000));
-        display_backlight_off();
-        display_deinit();
-        if (out_wifi_failed) {
-            *out_wifi_failed = true;
-        }
         return false;
     }
 
-    // Sync time — done, show main screen immediately with cached RTC data
+    // Sync time
     display_loading_status("正在同步");
     sync_time();
 
-    // Show main screen right after time sync (uses cached RTC weather data)
-    // Users see real content instead of a loading screen while waiting for weather
+    // Show main screen with cached data first
     {
         time_t now;
         time(&now);
         struct tm* tm_info = localtime(&now);
+        char update_str[32];
+        format_update_time(update_str, sizeof(update_str), s_last_weather_update);
         display_main_screen(
-            tm_info->tm_hour, tm_info->tm_min,
-            s_has_rtc_data ? s_rtc_data.weather_text : "晴",
-            s_has_rtc_data ? s_rtc_data.temperature : 25,
-            s_rtc_data.last_update_timestamp,
-            s_has_rtc_data ? s_rtc_data.weather_code : 100,
-            s_has_rtc_data ? s_rtc_data.humidity : 0,
-            s_has_rtc_data ? s_rtc_data.wind_scale : 0);
-        ESP_LOGI(TAG, "时间同步完成，用缓存数据显示主界面 (code=%d)",
-                 s_rtc_data.weather_code);
+            tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+            s_has_weather ? s_weather_data.weather_code : 100,
+            s_has_weather ? s_weather_data.weather_text : "晴",
+            s_has_weather ? s_weather_data.temperature : 25,
+            s_has_weather ? s_weather_data.humidity : 0,
+            s_has_weather ? s_weather_data.wind_scale : 0,
+            update_str);
     }
 
-    // Fetch weather in background — silently update the screen when done
+    // Fetch weather
     memset(&s_weather_data, 0, sizeof(s_weather_data));
-    bool weather_ok = weather_fetch(&s_weather_data);
-    
-    if (weather_ok) {
-        // Update RTC data
-        s_rtc_data.weather_code = s_weather_data.weather_code;
-        s_rtc_data.temperature = s_weather_data.temperature;
-        s_rtc_data.humidity = s_weather_data.humidity;
-        s_rtc_data.wind_scale = s_weather_data.wind_scale;
-        s_rtc_data.last_update_timestamp = s_weather_data.update_time;
-        strncpy(s_rtc_data.weather_text, s_weather_data.weather_text,
-                sizeof(s_rtc_data.weather_text) - 1);
-        s_has_rtc_data = true;
-        // Persist to RTC memory
-        power_save_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
-        ESP_LOGI(TAG, "RTC数据已保存: code=%d temp=%d time=%lu",
-                 s_rtc_data.weather_code, s_rtc_data.temperature,
-                 (unsigned long)s_rtc_data.last_update_timestamp);
+    if (weather_fetch(&s_weather_data)) {
+        // Fix system time if needed
+        if (!system_time_valid() && s_weather_data.update_time > 1577836800UL) {
+            set_system_time_from_epoch(s_weather_data.update_time);
+        }
 
-        // Refresh main screen with fresh weather data
+        s_has_weather = true;
+        s_last_weather_update = s_weather_data.update_time;
+
+        // Refresh screen with new data
         time_t now;
         time(&now);
         struct tm* tm_info = localtime(&now);
+        char update_str[32];
+        format_update_time(update_str, sizeof(update_str), s_last_weather_update);
         display_main_screen(
-            tm_info->tm_hour, tm_info->tm_min,
-            s_weather_data.weather_text,
-            s_weather_data.temperature,
-            s_weather_data.update_time,
-            s_weather_data.weather_code,
-            s_weather_data.humidity,
-            s_weather_data.wind_scale);
+            tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+            s_weather_data.weather_code, s_weather_data.weather_text,
+            s_weather_data.temperature, s_weather_data.humidity,
+            s_weather_data.wind_scale, update_str);
+
+        ESP_LOGI(TAG, "天气更新成功: code=%d temp=%d",
+                 s_weather_data.weather_code, s_weather_data.temperature);
+        return true;
     } else {
-        ESP_LOGW(TAG, "天气拉取失败，保持缓存数据");
+        ESP_LOGW(TAG, "天气获取失败");
+        return false;
     }
-
-    // 保持WiFi连接，不要在这里断开
-    // 保持显示开启，让调用者（enter_display_mode）给用户看30秒
-    // WiFi和显示将在进入休眠前统一关闭
-
-    return weather_ok;
 }
 
-static void enter_sleep_mode(void)
-{
-    // Save RTC data
-    power_save_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
-    
-    // Calculate sleep time in minutes
-    uint32_t sleep_minutes = (uint32_t)(SLEEP_INTERVAL_US / 60000000ULL);
-    uint32_t sleep_seconds = (uint32_t)((SLEEP_INTERVAL_US % 60000000ULL) / 1000000ULL);
-    
-    if (sleep_seconds > 0) {
-        ESP_LOGI(TAG, "进入深度休眠 %lu 分 %lu 秒", sleep_minutes, sleep_seconds);
-    } else {
-        ESP_LOGI(TAG, "进入深度休眠 %lu 分钟", sleep_minutes);
-    }
-    
-    power_enter_deep_sleep(SLEEP_INTERVAL_US);
-    // Should never reach here
-    while(1);
-}
-
+// =============================================================================
+// Mode: WiFi Config (SmartConfig)
+// =============================================================================
 static void enter_config_mode(void)
 {
     ESP_LOGI(TAG, "=== 配网模式 ===");
-    
-    bool config_success = false;
-    
-    // Initialize display
-    display_init();
+
+    if (!display_is_initialized()) {
+        if (display_init() != ESP_OK) {
+            ESP_LOGE(TAG, "显示初始化失败");
+            return;
+        }
+    }
     display_backlight_on();
     display_config_mode();
-    
-    // Initialize button handler
+
     button_init();
-    
-    // Start SmartConfig
+
     if (!wifi_start_smartconfig()) {
         ESP_LOGE(TAG, "启动SmartConfig失败");
         display_loading("失败");
         vTaskDelay(pdMS_TO_TICKS(2000));
         goto config_cleanup;
     }
-    
+
     ESP_LOGI(TAG, "SmartConfig已启动，等待手机...");
-    ESP_LOGI(TAG, "请使用微信小程序: 一键配网");
-    
-    // Wait for configuration or timeout
+
     uint32_t timeout_counter = 0;
-    
+    bool config_success = false;
+
     while (timeout_counter < SMARTCONFIG_TIMEOUT_MS) {
         vTaskDelay(pdMS_TO_TICKS(500));
         timeout_counter += 500;
-        
-        // Check if WiFi is connected (SmartConfig success)
+
         if (wifi_is_connected()) {
-            ESP_LOGI(TAG, "通过SmartConfig(一键配网)连接WiFi成功!");
+            ESP_LOGI(TAG, "配网成功!");
             display_config_success();
             vTaskDelay(pdMS_TO_TICKS(2000));
             config_success = true;
             break;
         }
-        
-        // Check for WAKE button long press to exit
+
         if (button_is_pressed(BUTTON_WAKE)) {
             button_event_t event = button_get_event(BUTTON_WAKE);
             if (event == BUTTON_EVENT_LONG_PRESS) {
-                ESP_LOGI(TAG, "长按WAKE键，退出配网模式");
-                // Wait for button release
+                ESP_LOGI(TAG, "长按WAKE键，退出配网");
                 while (button_is_pressed(BUTTON_WAKE)) {
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 break;
             }
         }
-        
-        // Update display with progress dots every 2 seconds
+
         if (timeout_counter % 2000 == 0) {
             int dots = (timeout_counter / 2000) % 4;
             char progress[32];
@@ -441,35 +407,18 @@ static void enter_config_mode(void)
             display_loading(progress);
         }
     }
-    
-    if (!config_success && timeout_counter >= SMARTCONFIG_TIMEOUT_MS) {
-        ESP_LOGW(TAG, "SmartConfig超时(一键配网超时)");
-        display_loading("超时");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-    
+
 config_cleanup:
-    // Cleanup
     wifi_stop_smartconfig();
     button_reset();
-    display_backlight_off();
-    display_deinit();
-    
-    // If config successful, update weather immediately
+
     if (config_success) {
         ESP_LOGI(TAG, "配网成功，更新天气...");
-        bool wifi_failed = false;
-        bool update_ok = enter_update_mode(&wifi_failed);
-        if (update_ok) {
-            // 更新成功，进入显示模式让用户看30秒
+        if (enter_update_mode()) {
             enter_display_mode();
         }
-        // 然后进入休眠
-        enter_sleep_mode();
     } else {
-        // SmartConfig failed/timeout, enter display mode with default data
-        ESP_LOGW(TAG, "SmartConfig失败(一键配网失败)，进入显示模式");
-        enter_display_mode();
+        ESP_LOGW(TAG, "配网失败/超时");
     }
 }
 
@@ -478,12 +427,12 @@ config_cleanup:
 // =============================================================================
 void app_main(void)
 {
-    // Initialize
     ESP_LOGI(TAG, "=================================");
     ESP_LOGI(TAG, "  电子吧唧 启动中...");
     ESP_LOGI(TAG, "  ESP32-C3 Super Mini");
+    ESP_LOGI(TAG, "  低功耗模式 (light sleep)");
     ESP_LOGI(TAG, "=================================");
-    
+
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -491,95 +440,72 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    
-    // Set WiFi log level to INFO for connection debugging
-    esp_log_level_set("wifi", ESP_LOG_INFO);
-    esp_log_level_set("WiFi", ESP_LOG_INFO);
-    
-    // Initialize WiFi manager (loads saved configs from NVS)
+
+    // Set timezone
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    // Initialize WiFi manager
     wifi_manager_init();
-    
+
     // Initialize power management
     power_init();
-    
+
+    // Initialize display
+    if (display_init() != ESP_OK) {
+        ESP_LOGE(TAG, "显示初始化失败，重启");
+        esp_restart();
+    }
+    display_backlight_on();
+
     // Get wakeup cause
     esp_sleep_wakeup_cause_t wakeup_cause = power_get_wakeup_cause();
     ESP_LOGI(TAG, "唤醒原因: %d", wakeup_cause);
-    
-    // Route based on wakeup cause
-    switch (wakeup_cause) {
-        case ESP_SLEEP_WAKEUP_TIMER:
-            if (enter_update_mode(NULL)) {
-                // 更新成功，进入显示模式让用户看30秒
-                enter_display_mode();
-            }
-            enter_sleep_mode();
-            break;
-            
-        case ESP_SLEEP_WAKEUP_GPIO:
-        case ESP_SLEEP_WAKEUP_UNDEFINED:
-        default:
-            // Load RTC data and increment boot count
-            bool rtc_valid = power_load_rtc_data(&s_rtc_data, sizeof(s_rtc_data));
-            if (!rtc_valid) {
-                ESP_LOGI(TAG, "RTC数据无效，已初始化为零");
-            }
-            s_rtc_data.boot_count++;
-            s_has_rtc_data = true;
-            ESP_LOGI(TAG, "启动次数: %lu", s_rtc_data.boot_count);
-            
-            // Check if we have any WiFi config (NVS or sdkconfig)
-            wifi_manager_config_t configs[5];
-            int nvs_count = wifi_load_configs(configs, 5);
-            bool has_sdkconfig_wifi = (strlen(CONFIG_WIFI_SSID) > 0);
-            
-            ESP_LOGI(TAG, "NVS配置数: %d, sdkconfig WiFi: %s", 
-                     nvs_count, has_sdkconfig_wifi ? "yes" : "no");
-            
-            if (nvs_count == 0 && !has_sdkconfig_wifi) {
-                // No WiFi config at all, enter config mode
-                ESP_LOGI(TAG, "未找到WiFi配置，进入配网模式");
-                enter_config_mode();
-            } else {
-                // Have WiFi config (NVS or sdkconfig), try to connect and update
-                if (s_rtc_data.boot_count == 1) {
-                    ESP_LOGI(TAG, "首次启动，更新天气...");
-                } else {
-                    ESP_LOGI(TAG, "检查天气数据新鲜度...");
-                }
-                
-                time_t now = time(NULL);
-                bool data_stale = (now - s_rtc_data.last_update_timestamp) > 3600;
-                
-                ESP_LOGI(TAG, "数据年龄: %ld 秒, 过期: %s", 
-                         (long)(now - s_rtc_data.last_update_timestamp),
-                         data_stale ? "yes" : "no");
-                
-                if (s_rtc_data.boot_count == 1 || data_stale) {
-                    ESP_LOGI(TAG, "更新天气...");
-                    bool wifi_failed = false;
-                    bool update_ok = enter_update_mode(&wifi_failed);
-                    
-                    if (!update_ok && wifi_failed && s_rtc_data.boot_count == 1) {
-                        // First boot and WiFi failed: enter config mode to let user configure
-                        ESP_LOGW(TAG, "首次启动WiFi失败，进入配网模式");
-                        enter_config_mode();
-                        // enter_config_mode() will enter sleep or display mode
-                        return;  // Should not reach here, but just in case
-                    }
-                    
-                    // After update, enter display mode so user can see the weather
-                    // instead of immediately going to sleep
-                    ESP_LOGI(TAG, "更新完成，进入显示模式");
-                    enter_display_mode();
-                } else {
-                    ESP_LOGI(TAG, "天气数据新鲜，进入显示模式");
-                    enter_display_mode();
-                }
-            }
-            break;
+
+    // Check if we have WiFi config
+    wifi_manager_config_t configs[5];
+    int nvs_count = wifi_load_configs(configs, 5);
+    bool has_sdkconfig_wifi = (strlen(CONFIG_WIFI_SSID) > 0);
+
+    ESP_LOGI(TAG, "NVS配置数: %d, sdkconfig WiFi: %s",
+             nvs_count, has_sdkconfig_wifi ? "yes" : "no");
+
+    // First boot or no WiFi config
+    if (nvs_count == 0 && !has_sdkconfig_wifi) {
+        ESP_LOGI(TAG, "未找到WiFi配置，进入配网模式");
+        enter_config_mode();
+        // After config, enter low power mode
+        enter_low_power_mode();
+        return;
     }
-    
-    // Enter sleep after display mode
-    enter_sleep_mode();
+
+    // Normal boot flow
+    s_boot_count++;
+    ESP_LOGI(TAG, "启动次数: %lu", s_boot_count);
+
+    // Check if first boot or weather data stale
+    time_t now = time(NULL);
+    bool data_stale = s_has_weather &&
+                      (now - (time_t)s_last_weather_update) > 3600;
+
+    if (s_boot_count == 1 || data_stale || !s_has_weather) {
+        ESP_LOGI(TAG, "需要更新天气 (首次启动或数据过期)");
+        if (enter_update_mode()) {
+            enter_display_mode();
+        } else {
+            // Update failed, still show display with cached/default data
+            enter_display_mode();
+        }
+    } else {
+        ESP_LOGI(TAG, "天气数据新鲜，进入显示模式");
+        enter_display_mode();
+    }
+
+    // After display mode timeout or button press, enter low power mode
+    ESP_LOGI(TAG, "进入低功耗模式");
+    enter_low_power_mode();
+
+    // Should never reach here (low power mode loops forever)
+    ESP_LOGW(TAG, "低功耗模式异常退出，重启");
+    esp_restart();
 }

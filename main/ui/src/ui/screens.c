@@ -34,12 +34,12 @@ void create_screen_badge_main() {
             {
                 lv_obj_t *parent_obj = obj;
                 {
-                    // qweather_icons — 52x52, centered horizontally, moved down
+                    // qweather_icons — 80x80, centered horizontally
+                    // PNG icon will be loaded from SPIFFS at runtime
                     lv_obj_t *obj = lv_img_create(parent_obj);
                     objects.qweather_icons = obj;
-                    lv_obj_set_pos(obj, 94, 80);
-                    lv_obj_set_size(obj, 52, 52);
-                    lv_img_set_src(obj, &weather_100);
+                    lv_obj_set_pos(obj, 80, 72);
+                    lv_obj_set_size(obj, 80, 80);
                 }
                 {
                     // label_date

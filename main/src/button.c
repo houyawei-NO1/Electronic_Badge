@@ -31,6 +31,7 @@ typedef struct {
     uint32_t press_start_time;
     bool long_press_triggered;
     button_event_t pending_event;
+    uint32_t last_event_time;  // For debounce
 } button_state_t;
 
 static button_state_t button_states[BUTTON_MAX];
@@ -80,6 +81,7 @@ void button_init(void)
         // Initialize state
         memset(&button_states[i], 0, sizeof(button_state_t));
         button_states[i].pending_event = BUTTON_EVENT_NONE;
+        button_states[i].last_event_time = 0;
         
         // Debug: log initial GPIO state
         int level = gpio_get_level(cfg->gpio);
@@ -120,8 +122,8 @@ void button_task(void* arg)
     uint32_t last_update_tick = 0;
     
     while (1) {
-        // Check queue for button events
-        if (xQueueReceive(button_event_queue, &button_id, pdMS_TO_TICKS(10)) == pdTRUE) {
+        // Check queue for button events (with debounce timeout)
+        if (xQueueReceive(button_event_queue, &button_id, pdMS_TO_TICKS(50)) == pdTRUE) {
             if (button_id >= BUTTON_MAX) continue;
             
             button_state_t* state = &button_states[button_id];
@@ -130,29 +132,37 @@ void button_task(void* arg)
             bool current_level = gpio_get_level(cfg->gpio) == 0;
             uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
             
-            // Debug: log GPIO state change
-            DEBUG_LOG_GPIO(TAG, cfg->gpio, current_level ? 0 : 1);
-            
-            if (current_level && !state->is_pressed) {
-                // Button just pressed
-                state->is_pressed = true;
-                state->press_start_time = now_ms;
-                state->long_press_triggered = false;
-                DEBUG_LOG(TAG, "Button %d (GPIO%d) pressed", button_id, cfg->gpio);
+            // Debounce: ignore events too close together
+            if (state->last_event_time > 0 && 
+                (now_ms - state->last_event_time) < cfg->debounce_ms) {
+                continue;
             }
-            else if (!current_level && state->is_pressed) {
-                // Button just released
-                state->is_pressed = false;
-                uint32_t press_duration = now_ms - state->press_start_time;
+            state->last_event_time = now_ms;
+            
+            // Only log if state actually changed
+            if (current_level != state->is_pressed) {
+                DEBUG_LOG_GPIO(TAG, cfg->gpio, current_level ? 0 : 1);
                 
-                if (!state->long_press_triggered) {
-                    // Short press
-                    state->pending_event = BUTTON_EVENT_PRESS;
-                    DEBUG_LOG(TAG, "Button %d (GPIO%d) short press (duration: %d ms)", 
-                              button_id, cfg->gpio, press_duration);
+                if (current_level) {
+                    // Button just pressed
+                    state->is_pressed = true;
+                    state->press_start_time = now_ms;
+                    state->long_press_triggered = false;
+                    DEBUG_LOG(TAG, "Button %d (GPIO%d) pressed", button_id, cfg->gpio);
                 } else {
-                    DEBUG_LOG(TAG, "Button %d (GPIO%d) released after long press", 
-                              button_id, cfg->gpio);
+                    // Button just released
+                    state->is_pressed = false;
+                    uint32_t press_duration = now_ms - state->press_start_time;
+                    
+                    if (!state->long_press_triggered) {
+                        // Short press
+                        state->pending_event = BUTTON_EVENT_PRESS;
+                        DEBUG_LOG(TAG, "Button %d (GPIO%d) short press (duration: %d ms)", 
+                                  button_id, cfg->gpio, press_duration);
+                    } else {
+                        DEBUG_LOG(TAG, "Button %d (GPIO%d) released after long press", 
+                                  button_id, cfg->gpio);
+                    }
                 }
             }
             

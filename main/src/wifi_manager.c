@@ -3,6 +3,7 @@
  * @brief WiFi management implementation
  */
 #include <string.h>
+#include <stdlib.h>
 #include "wifi_manager.h"
 #include "config.h"
 #include "esp_wifi.h"
@@ -132,8 +133,7 @@ bool wifi_connect(void)
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
         ESP_ERROR_CHECK(esp_wifi_start());
-        // Note: WIFI_EVENT_STA_START will trigger esp_wifi_connect() in event handler
-        
+
         ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
         EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                                CONNECTED_BIT | WIFI_FAIL_BIT,
@@ -301,6 +301,9 @@ void wifi_stop_smartconfig(void)
     s_smartconfig_active = false;
 }
 
+// 扫描附近 AP 并打印信号强度（用于对比天线性能）
+static void wifi_scan_ap_rssi(void);
+
 void wifi_event_handler(void* arg, esp_event_base_t event_base,
                        int32_t event_id, void* event_data)
 {
@@ -322,6 +325,10 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                     } else {
                         // Normal mode: retry connection
                         if (s_retry_num < WIFI_MAX_RETRY) {
+                            // 第一次重试时扫描附近 AP 信号强度，方便对比天线性能
+                            if (s_retry_num == 0) {
+                                wifi_scan_ap_rssi();
+                            }
                             ESP_LOGI(TAG_WIFI, "重试连接 (%d/%d)...", 
                                      s_retry_num + 1, WIFI_MAX_RETRY);
                             esp_wifi_connect();
@@ -380,4 +387,69 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 break;
         }
     }
+}
+
+// 扫描附近 AP 并打印信号强度（RSSI），用于对比天线性能
+static void wifi_scan_ap_rssi(void)
+{
+    uint16_t ap_count = 0;
+    
+    ESP_LOGI(TAG_WIFI, "===== 附近 WiFi 信号扫描 =====");
+    
+    // 扫描（阻塞式，最多 1 秒）
+    esp_err_t ret = esp_wifi_scan_start(NULL, true);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG_WIFI, "WiFi扫描失败: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    // 获取扫描结果数量
+    esp_wifi_scan_get_ap_num(&ap_count);
+    if (ap_count == 0) {
+        ESP_LOGW(TAG_WIFI, "未扫描到任何 AP");
+        esp_wifi_scan_get_ap_records(&ap_count, NULL);
+        return;
+    }
+    
+    // 限制最多显示 10 个
+    if (ap_count > 10) ap_count = 10;
+    
+    wifi_ap_record_t* ap_list = malloc(ap_count * sizeof(wifi_ap_record_t));
+    if (!ap_list) {
+        ESP_LOGW(TAG_WIFI, "内存不足，无法分配 AP 列表");
+        esp_wifi_scan_get_ap_records(&ap_count, NULL);
+        return;
+    }
+    
+    ret = esp_wifi_scan_get_ap_records(&ap_count, ap_list);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG_WIFI, "获取 AP 记录失败: %s", esp_err_to_name(ret));
+        free(ap_list);
+        return;
+    }
+    
+    // 按 RSSI 排序（信号从强到弱）
+    for (int i = 0; i < (int)ap_count - 1; i++) {
+        for (int j = i + 1; j < (int)ap_count; j++) {
+            if (ap_list[j].rssi > ap_list[i].rssi) {
+                wifi_ap_record_t tmp = ap_list[i];
+                ap_list[i] = ap_list[j];
+                ap_list[j] = tmp;
+            }
+        }
+    }
+    
+    ESP_LOGI(TAG_WIFI, "扫描到 %d 个 AP (按信号强度排序):", ap_count);
+    ESP_LOGI(TAG_WIFI, " %-20s  RSSI  CH  Auth", "SSID");
+    ESP_LOGI(TAG_WIFI, " --------------------  ----  --  ----");
+    
+    for (int i = 0; i < (int)ap_count; i++) {
+        const char* auth_str = (ap_list[i].authmode == WIFI_AUTH_OPEN) ? "OPEN" : "WPA";
+        ESP_LOGI(TAG_WIFI, " %-20s  %4d  %2d  %s",
+                 ap_list[i].ssid, ap_list[i].rssi, ap_list[i].primary, auth_str);
+    }
+    
+    ESP_LOGI(TAG_WIFI, "===============================");
+    
+    free(ap_list);
 }

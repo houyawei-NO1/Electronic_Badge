@@ -2,17 +2,53 @@
  * @file display.c
  * @brief GC9A01 display driver with LVGL UI
  *
- * Uses esp_lcd + esp_lcd_gc9a01 + esp_lvgl_port to drive
- * GC9A01 1.28" round display (240x240) with LVGL widgets.
- * UI screens are designed with PicoPixel and exported to ui/
+ * GC9A01 1.28" round LCD (240x240) + LVGL v8.3.x + PicoPixel UI.
+ *
+ * [CRITICAL HARDWARE NOTE]
+ * RST (GPIO5) controls BOTH panel reset AND backlight power on this
+ * module. RST HIGH → backlight on; RST LOW → backlight off. There is
+ * no separate backlight-enable pin.
+ *
+ * [WEATHER ICONS — ZERO RUN-TIME DECODING]
+ *   Weather icons are pre-converted from PNG to raw RGB565+alpha binary
+ *   at BUILD TIME by scripts/png_to_rgb565a.py and stored in SPIFFS as
+ *   <code>-fill.bin. At run-time we simply fread() into a malloc'd buffer
+ *   and hand the lv_img_dsc_t pointer to LVGL.
+ *
+ *   Icon size: 48x48 (fits 51 icons in 512 KB SPIFFS partition.
+ *   Night codes (150-153, 350-351, 456-457) share day icons (100-103,
+ *   300-301, 406-407) via weather_code_to_bin_path() mapping — no separate
+ *   bin files exist for night codes.
+ *
+ *   Why not decode PNG at run-time?
+ *   - LVGL's png decoder uses lv_mem_alloc/lv_mem_free (LVGL internal heap)
+ *     NOT the standard heap. Calling free() on an lv_mem_alloc'd pointer
+ *     triggers heap_caps_free → assert fail → crash.
+ *   - Calling lv_mem_alloc/lv_mem_free outside lvgl_port_lock is also
+ *     a concurrency bug — LVGL's allocator walks its free-list without
+ *     any other mutex protection than the port lock.
+ *   - PNG Huffman decoding is CPU-heavy; doing it while holding the port
+ *     lock starves the LVGL refresh task and triggers the task watchdog.
+ *
+ *   Binary file layout (little-endian, tightly packed):
+ *       bytes 0-1 : uint16_t width
+ *       bytes 2-3 : uint16_t height
+ *       bytes 4+  : w * h * 3 bytes — for each pixel:
+ *                     byte0 = (RGB565) & 0xFF
+ *                     byte1 = (RGB565 >> 8) & 0xFF
+ *                     byte2 = alpha (0 transparent, 255 opaque)
  */
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include <time.h>
 #include "display.h"
 #include "config.h"
 #include "esp_log.h"
 #include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_panel_ops.h"
 #include "esp_lcd_gc9a01.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -21,222 +57,256 @@
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 #include "ui.h"
+#include "esp_spiffs.h"
 
-static const char* TAG = "显示";
+static const char *TAG = "显示";
 
-// =============================================================================
-// Module state
-// =============================================================================
+/* =========================================================================
+ * Module state
+ * ========================================================================= */
+typedef struct {
+    bool valid;
+    int16_t code;           /* cached weather code (skip re-load on match) */
+    uint8_t *pixel_buf;     /* malloc'd buffer: [2B width][2B height][w*h*3B pixels] */
+    lv_img_dsc_t dsc;       /* LVGL descriptor; dsc.data points into pixel_buf */
+} cached_icon_t;
+
+static cached_icon_t cached_weather_icon;
 static bool is_initialized = false;
-static lv_disp_t *disp_handle = NULL;
-static esp_lcd_panel_io_handle_t io_handle = NULL;
-static esp_lcd_panel_handle_t panel_handle = NULL;
 
-// Animation state
+bool display_is_initialized(void)
+{
+    return is_initialized;
+}
+static lv_disp_t *disp_handle = NULL;
+static esp_lcd_panel_handle_t panel_handle = NULL;
+static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 static lv_timer_t *colon_blink_timer = NULL;
 static bool colon_visible = true;
-static int last_hour = 0;
-static int last_minute = 0;
-static int last_wday = 1;
 
-// =============================================================================
-// GC9A01 manufacturer initialization sequence
-// =============================================================================
-static const gc9a01_lcd_init_cmd_t gc9a01_init_cmds[] = {
-    {0xFE, (uint8_t[]){0x00}, 0, 0},
-    {0xEF, (uint8_t[]){0x00}, 0, 0},
-    {0xEB, (uint8_t[]){0x14}, 1, 0},
-    {0x84, (uint8_t[]){0x40}, 1, 0},
-    {0x85, (uint8_t[]){0xF1}, 1, 0},
-    {0x86, (uint8_t[]){0x98}, 1, 0},
-    {0x87, (uint8_t[]){0x28}, 1, 0},
-    {0x88, (uint8_t[]){0x0A}, 1, 0},
-    {0x89, (uint8_t[]){0x21}, 1, 0},
-    {0x8A, (uint8_t[]){0x00}, 1, 0},
-    {0x8B, (uint8_t[]){0x80}, 1, 0},
-    {0x8C, (uint8_t[]){0x01}, 1, 0},
-    {0x8D, (uint8_t[]){0x00}, 1, 0},
-    {0x8E, (uint8_t[]){0xDF}, 1, 0},
-    {0x8F, (uint8_t[]){0x52}, 1, 0},
-    {0xB6, (uint8_t[]){0x20}, 1, 0},
-    {0x36, (uint8_t[]){0x08}, 1, 0},
-    {0x3A, (uint8_t[]){0x05}, 1, 0},
-    {0x90, (uint8_t[]){0x08, 0x08, 0x08, 0x08}, 4, 0},
-    {0xBD, (uint8_t[]){0x06}, 1, 0},
-    {0xBF, (uint8_t[]){0x1C}, 1, 0},
-    {0xA7, (uint8_t[]){0x45}, 1, 0},
-    {0xA9, (uint8_t[]){0xBB}, 1, 0},
-    {0xB8, (uint8_t[]){0x63}, 1, 0},
-    {0xBC, (uint8_t[]){0x00}, 1, 0},
-    {0xFF, (uint8_t[]){0x60, 0x01, 0x04}, 3, 0},
-    {0xC3, (uint8_t[]){0x17}, 1, 0},
-    {0xC4, (uint8_t[]){0x17}, 1, 0},
-    {0xC9, (uint8_t[]){0x25}, 1, 0},
-    {0xBE, (uint8_t[]){0x11}, 1, 0},
-    {0xE1, (uint8_t[]){0x10, 0x0E}, 2, 0},
-    {0xDF, (uint8_t[]){0x21, 0x10, 0x02}, 3, 0},
-    {0xF0, (uint8_t[]){0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}, 6, 0},
-    {0xF1, (uint8_t[]){0x43, 0x70, 0x72, 0x36, 0x37, 0x6F}, 6, 0},
-    {0xF2, (uint8_t[]){0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}, 6, 0},
-    {0xF3, (uint8_t[]){0x43, 0x70, 0x72, 0x36, 0x37, 0x6F}, 6, 0},
-    {0xED, (uint8_t[]){0x1B, 0x0B}, 2, 0},
-    {0xAC, (uint8_t[]){0x47}, 1, 0},
-    {0xAE, (uint8_t[]){0x77}, 1, 0},
-    {0xCB, (uint8_t[]){0x02}, 1, 0},
-    {0xCD, (uint8_t[]){0x63}, 1, 0},
-    {0x70, (uint8_t[]){0x07, 0x09, 0x04, 0x0E, 0x0F, 0x09, 0x07, 0x08, 0x03}, 9, 0},
-    {0xE8, (uint8_t[]){0x34}, 1, 0},
-    {0x62, (uint8_t[]){0x18, 0x0D, 0x71, 0xED, 0x70, 0x70, 0x18, 0x0F, 0x71, 0xEF, 0x70, 0x70}, 12, 0},
-    {0x63, (uint8_t[]){0x18, 0x11, 0x71, 0xF1, 0x70, 0x70, 0x18, 0x13, 0x71, 0xF3, 0x70, 0x70}, 12, 0},
-    {0x64, (uint8_t[]){0x28, 0x29, 0xF1, 0x01, 0xF1, 0x00, 0x07}, 7, 0},
-    {0x66, (uint8_t[]){0x3C, 0x00, 0xCD, 0x67, 0x45, 0x45, 0x10, 0x00, 0x00, 0x00}, 10, 0},
-    {0x67, (uint8_t[]){0x00, 0x3C, 0x00, 0x00, 0x00, 0x01, 0x54, 0x10, 0x32, 0x98}, 10, 0},
-    {0x74, (uint8_t[]){0x10, 0x85, 0x80, 0x00, 0x00, 0x4E, 0x00}, 7, 0},
-    {0x35, (uint8_t[]){0x00}, 0, 0},
-    {0x21, (uint8_t[]){0x00}, 0, 0},
-    {0x11, (uint8_t[]){0x00}, 0, 120},
-    {0x29, (uint8_t[]){0x00}, 0, 0},
-};
+/* Time state (for colon blink) */
+static int last_hour = -1;
+static int last_minute = -1;
+static int last_wday = -1;
 
-#define GC9A01_INIT_CMD_COUNT (sizeof(gc9a01_init_cmds) / sizeof(gc9a01_init_cmds[0]))
+/* =========================================================================
+ * SPIFFS helpers
+ * ========================================================================= */
 
-// =============================================================================
-// Helper: Get weather name string (font-safe, avoids missing glyphs)
-// Font has: 晴雨雪大小中冷温电  —  DOES NOT have: 云阴湿风级雾霾雷暴扫码微唤醒按键网
-// For missing-char weather, use English as fallback.
-// =============================================================================
-static const char* get_weather_name(int16_t weather_code)
+/**
+ * @brief Map a QWeather condition code → SPIFFS path of the pre-decoded
+ *        RGB565+alpha binary file.
+ */
+static void weather_code_to_bin_path(int16_t code, char *buf, size_t buf_size)
 {
-    // Use weather_code to pick a safe display name
-    if (weather_code == 100) return "晴";
-    if (weather_code >= 101 && weather_code <= 104) return "Cloudy";  // 多云/少云/晴间多云/阴
-    if (weather_code >= 300 && weather_code <= 301) return "Rain";    // 阵雨
-    if (weather_code >= 302 && weather_code <= 304) return "Storm";   // 雷阵雨
-    if (weather_code >= 305 && weather_code <= 308) return "小雨";     // 小雨/中雨/大雨/暴雨
-    if (weather_code >= 309 && weather_code <= 313) return "大雨";     // 各种雨
-    if (weather_code == 400) return "小雪";
-    if (weather_code == 401) return "中雪";
-    if (weather_code >= 402 && weather_code <= 407) return "大雪";
-    if (weather_code == 408) return "雨雪";  // 雨夹雪
-    if (weather_code >= 500 && weather_code <= 502) return "Fog";      // 雾
-    if (weather_code >= 511 && weather_code <= 515) return "Haze";     // 霾/沙尘
-    if (weather_code >= 350 && weather_code <= 399) return "Storm";    // 特殊雷暴/雪
-    if (weather_code >= 150 && weather_code <= 199) return "晴";
-    return "晴";
+    /* "夜间" code aliases to the 日间 icon for the same weather */
+    int16_t day_code = code;
+    switch (code) {
+        case 150: day_code = 100; break;
+        case 151: day_code = 101; break;
+        case 152: day_code = 102; break;
+        case 153: day_code = 103; break;
+        case 350: day_code = 300; break;
+        case 351: day_code = 301; break;
+        case 456: day_code = 406; break;
+        case 457: day_code = 407; break;
+    }
+    snprintf(buf, buf_size, "/spiffs/%d-fill.bin", day_code);
 }
 
-// =============================================================================
-// display_init - Initialize SPI bus, GC9A01 panel, and LVGL
-// =============================================================================
+static esp_err_t init_spiffs(void)
+{
+    ESP_LOGI(TAG, "初始化 SPIFFS...");
+
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = "spiffs",
+        .max_files = 5,
+        .format_if_mount_failed = true,
+    };
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPIFFS 挂载失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    size_t total = 0, used = 0;
+    ret = esp_spiffs_info("spiffs", &total, &used);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "SPIFFS: total=%dKB, used=%dKB", total / 1024, used / 1024);
+    }
+    return ESP_OK;
+}
+
+/* =========================================================================
+ * Weather icon loader — fread() the pre-converted RGB565+alpha binary
+ * =========================================================================
+ *
+ * IMPORTANT: This function only uses malloc / free / fopen / fread.
+ * It NEVER calls lv_mem_alloc / lv_mem_free / lodepng_decode32. That
+ * guarantees it is safe to call from ANY task at ANY time, with or
+ * without lvgl_port_lock held.
+ * ========================================================================= */
+esp_err_t display_prepare_weather_icon(int16_t weather_code)
+{
+    /* Drop the old buffer before allocating a new one */
+    if (cached_weather_icon.pixel_buf) {
+        free(cached_weather_icon.pixel_buf);
+    }
+    memset(&cached_weather_icon, 0, sizeof(cached_weather_icon));
+
+    char path[64];
+    weather_code_to_bin_path(weather_code, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "[图标] 二进制文件不存在: %s", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    /* --- Read 4-byte header: width (uint16 LE), height (uint16 LE) --- */
+    uint8_t hdr[4];
+    size_t nr = fread(hdr, 1, sizeof(hdr), f);
+    if (nr != sizeof(hdr)) {
+        ESP_LOGE(TAG, "[图标] 读 header 失败: %s", path);
+        fclose(f);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint16_t w = (uint16_t)((uint16_t)hdr[1] << 8 | hdr[0]);
+    uint16_t h = (uint16_t)((uint16_t)hdr[3] << 8 | hdr[2]);
+    uint32_t pixel_bytes = (uint32_t)w * (uint32_t)h * 3U;
+    uint32_t total_bytes = 4U + pixel_bytes;
+
+    /* --- Allocate one contiguous buffer for header + pixels so
+     *     dsc.data can simply point at offset 4 --- */
+    uint8_t *buf = (uint8_t *)malloc(total_bytes);
+    if (!buf) {
+        ESP_LOGE(TAG, "[图标] malloc 失败 (%u bytes)", (unsigned)total_bytes);
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+    buf[0] = hdr[0]; buf[1] = hdr[1];
+    buf[2] = hdr[2]; buf[3] = hdr[3];
+
+    nr = fread(buf + 4, 1, pixel_bytes, f);
+    fclose(f);
+    if (nr != pixel_bytes) {
+        ESP_LOGE(TAG, "[图标] 像素数据不完整: %s (got %zu, want %u)",
+                 path, nr, (unsigned)pixel_bytes);
+        free(buf);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* --- Populate lv_img_dsc_t (point into buf + 4) --- */
+    cached_weather_icon.pixel_buf = buf;
+    cached_weather_icon.dsc.header.always_zero = 0;
+    cached_weather_icon.dsc.header.w = w;
+    cached_weather_icon.dsc.header.h = h;
+    cached_weather_icon.dsc.header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
+    cached_weather_icon.dsc.data_size = pixel_bytes;
+    cached_weather_icon.dsc.data = buf + 4;
+    cached_weather_icon.code = weather_code;
+    cached_weather_icon.valid = true;
+
+    ESP_LOGI(TAG, "[图标] 已加载: %s (%ux%u, cf=TRUE_COLOR_ALPHA, %u bytes)",
+             path, (unsigned)w, (unsigned)h, (unsigned)total_bytes);
+    return ESP_OK;
+}
+
+/* =========================================================================
+ * Display initialization
+ * ========================================================================= */
 esp_err_t display_init(void)
 {
     if (is_initialized) {
+        ESP_LOGW(TAG, "显示已初始化，跳过");
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "初始化显示 (LVGL + GC9A01)...");
+    ESP_LOGI(TAG, "初始化 GC9A01 显示...");
 
-    // Step 1: Initialize SPI bus
-    ESP_LOGI(TAG, "初始化SPI总线 (SCK=%d, MOSI=%d)", GPIO_SPI_SCK, GPIO_SPI_MOSI);
+    /* --- 0. Ensure RST/BL pin is configured as output and held high
+     *        before SPI traffic starts. power_init() may have left it
+     *        as input pull-down, which can glitch the panel. --- */
+    gpio_config_t rst_conf = {
+        .pin_bit_mask = 1ULL << GPIO_LCD_RST,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&rst_conf);
+    gpio_set_level(GPIO_LCD_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(5));
 
+    /* --- 1. SPI bus --- */
     spi_bus_config_t buscfg = {
         .sclk_io_num = GPIO_SPI_SCK,
         .mosi_io_num = GPIO_SPI_MOSI,
         .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = DISPLAY_WIDTH * 80 * sizeof(uint16_t),
+        .max_transfer_sz = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t),
     };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPI总线初始化失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // Step 2: Create LCD panel IO (SPI)
-    ESP_LOGI(TAG, "创建面板IO (DC=%d, CS=%d)", GPIO_LCD_DC, GPIO_LCD_CS);
-
-    esp_lcd_panel_io_handle_t panel_io = NULL;
+    /* --- 2. Panel IO (8-bit SPI) --- */
     esp_lcd_panel_io_spi_config_t io_config = {
-        .cs_gpio_num = GPIO_LCD_CS,
         .dc_gpio_num = GPIO_LCD_DC,
-        .spi_mode = 0,
+        .cs_gpio_num = GPIO_LCD_CS,
         .pclk_hz = DISPLAY_SPI_FREQ,
-        .trans_queue_depth = 10,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
-        .on_color_trans_done = NULL,
-        .user_ctx = NULL,
-        .flags = {
-            .dc_low_on_data = 0,
-            .octal_mode = 0,
-            .lsb_first = 0,
-        },
+        .spi_mode = 0,
+        .trans_queue_depth = 10,
     };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(
+        (esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &panel_io_handle));
 
-    ret = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST, &io_config, &panel_io);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "面板IO初始化失败: %s", esp_err_to_name(ret));
-        spi_bus_free(SPI2_HOST);
-        return ret;
-    }
-    io_handle = panel_io;
-
-    // Step 3: Create GC9A01 panel with manufacturer init sequence
-    ESP_LOGI(TAG, "安装GC9A01面板驱动 (RST=%d)", GPIO_LCD_RST);
-
-    esp_lcd_panel_handle_t panel = NULL;
-    gc9a01_vendor_config_t vendor_config = {
-        .init_cmds = gc9a01_init_cmds,
-        .init_cmds_size = GC9A01_INIT_CMD_COUNT,
-    };
-
-    const esp_lcd_panel_dev_config_t panel_config = {
+    /* --- 3. GC9A01 panel --- */
+    esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = GPIO_LCD_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .rgb_endian = LCD_RGB_ENDIAN_RGB,
         .bits_per_pixel = 16,
-        .vendor_config = &vendor_config,
     };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_gc9a01(panel_io_handle, &panel_config, &panel_handle));
 
-    ret = esp_lcd_new_panel_gc9a01(panel_io, &panel_config, &panel);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "GC9A01面板初始化失败: %s", esp_err_to_name(ret));
-        esp_lcd_panel_io_del(panel_io);
-        spi_bus_free(SPI2_HOST);
-        return ret;
-    }
-    panel_handle = panel;
+    /* Perform hardware reset and wait for panel to stabilize */
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+    vTaskDelay(pdMS_TO_TICKS(10));   /* GC9A01 needs ~5ms after reset */
 
-    esp_lcd_panel_reset(panel);
-    esp_lcd_panel_init(panel);
-    esp_lcd_panel_disp_on_off(panel, true);
+    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 
-    ESP_LOGI(TAG, "GC9A01面板初始化成功");
+    /* Backlight on: RST pin is shared with backlight on this module.
+     * Must wait after disp_on_off before driving RST high, otherwise
+     * the panel may latch into reset mode instead of normal operation. */
+    vTaskDelay(pdMS_TO_TICKS(5));
+    gpio_set_level(GPIO_LCD_RST, 1);
 
-    // Step 4: Initialize LVGL
-    ESP_LOGI(TAG, "初始化LVGL...");
+    ESP_LOGI(TAG, "Panel 初始化完成 (RST=背光=ON)");
 
-    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-    ret = lvgl_port_init(&lvgl_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "LVGL端口初始化失败: %s", esp_err_to_name(ret));
-        esp_lcd_panel_del(panel);
-        esp_lcd_panel_io_del(panel_io);
-        spi_bus_free(SPI2_HOST);
-        return ret;
-    }
+    /* --- 4. LVGL port --- */
+    const lvgl_port_cfg_t lvgl_cfg = {
+        .task_priority = 5,
+        .task_stack = 4096,
+        .task_affinity = -1,
+        .task_max_sleep_ms = 500,
+        .timer_period_ms = 5,
+    };
+    ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
 
-    // Step 5: Add display to LVGL
-    ESP_LOGI(TAG, "添加显示到LVGL...");
-
+    /* --- 5. Register display with LVGL --- */
     const lvgl_port_display_cfg_t disp_cfg = {
-        .io_handle = panel_io,
-        .panel_handle = panel,
-        .buffer_size = DISPLAY_WIDTH * DISPLAY_HEIGHT / 10 * sizeof(uint16_t),
+        .io_handle = panel_io_handle,
+        .panel_handle = panel_handle,
+        .buffer_size = DISPLAY_WIDTH * 20,   /* ~1/12 screen, single-buffered */
         .double_buffer = false,
         .hres = DISPLAY_WIDTH,
         .vres = DISPLAY_HEIGHT,
+        .monochrome = false,
         .rotation = {
             .swap_xy = false,
             .mirror_x = true,
@@ -246,51 +316,88 @@ esp_err_t display_init(void)
             .buff_dma = true,
             .buff_spiram = false,
             .sw_rotate = false,
-            .full_refresh = false,
             .direct_mode = false,
         },
     };
-
     disp_handle = lvgl_port_add_disp(&disp_cfg);
     if (disp_handle == NULL) {
-        ESP_LOGE(TAG, "添加显示到LVGL失败");
+        ESP_LOGE(TAG, "添加显示到 LVGL 失败");
         lvgl_port_deinit();
-        esp_lcd_panel_del(panel);
-        esp_lcd_panel_io_del(panel_io);
+        esp_lcd_panel_del(panel_handle);
+        panel_handle = NULL;
+        esp_lcd_panel_io_del(panel_io_handle);
+        panel_io_handle = NULL;
         spi_bus_free(SPI2_HOST);
         return ESP_FAIL;
     }
 
-    // Step 6: Initialize PicoPixel UI
-    ESP_LOGI(TAG, "初始化PicoPixel UI...");
-    ui_init();
+    /* --- 6. SPIFFS (holds the pre-decoded icon binaries) --- */
+    init_spiffs();
 
-    // Step 7: Set all screen backgrounds to pure black
-    // This ensures no gray background bleeding through icons/containers
+    /* --- 7. PicoPixel UI (must hold port lock — LVGL task is running) --- */
+    ESP_LOGI(TAG, "初始化 PicoPixel UI...");
     lvgl_port_lock(0);
-    // LVGL active screen
-    lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    // All PicoPixel screens
-    lv_obj_set_style_bg_color(objects.badge_main, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(objects.badge_main, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(objects.badge_success, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(objects.badge_success, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(objects.badge_loading, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(objects.badge_loading, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(objects.badge_config, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(objects.badge_config, LV_OPA_COVER, 0);
+    ui_init();
+    lvgl_port_unlock();
+
+    /* --- 8. Force label colors / fonts to white / simsun_16_cjk --- */
+    lvgl_port_lock(0);
+    lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
+    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
+
+    /* All labels → white text, opaque (never let theme pick gray/black) */
+    lv_obj_t *label_list[] = {
+        objects.label_1, objects.label_2, objects.label_3,
+        objects.label_4, objects.label_5, objects.label_6,
+        objects.label_7, objects.label_time, objects.label_date,
+        objects.label_weather, objects.label_temp, objects.label_detail,
+        objects.label_update,
+    };
+    for (size_t i = 0; i < sizeof(label_list) / sizeof(label_list[0]); i++) {
+        lv_obj_t *lbl = label_list[i];
+        if (!lbl) continue;
+        lv_obj_set_style_text_color(lbl, lv_color_white(),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_opa(lbl, LV_OPA_COVER,
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    /* Chinese-capable labels → simsun_16_cjk font */
+    lv_obj_t *cn_labels[] = {
+        objects.label_1, objects.label_weather, objects.label_update,
+    };
+    for (size_t i = 0; i < sizeof(cn_labels) / sizeof(cn_labels[0]); i++) {
+        if (cn_labels[i]) {
+            lv_obj_set_style_text_font(cn_labels[i], &lv_font_simsun_16_cjk,
+                                        LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+    /* Time includes Chinese weekday (周一~周日) — simsun */
+    if (objects.label_time)
+        lv_obj_set_style_text_font(objects.label_time, &lv_font_simsun_16_cjk, 0);
+    /* Date / temp / detail — english/numerals — montserrat */
+    if (objects.label_date)
+        lv_obj_set_style_text_font(objects.label_date, &lv_font_montserrat_18, 0);
+    if (objects.label_temp)
+        lv_obj_set_style_text_font(objects.label_temp, &lv_font_montserrat_18, 0);
+    if (objects.label_detail)
+        lv_obj_set_style_text_font(objects.label_detail, &lv_font_montserrat_14, 0);
+    lvgl_port_unlock();
+
+    /* Force immediate screen refresh to ensure content is visible
+     * before returning (prevents black screen on first boot) */
+    lvgl_port_lock(0);
+    lv_refr_now(lv_disp_get_default());
     lvgl_port_unlock();
 
     is_initialized = true;
-    ESP_LOGI(TAG, "显示初始化成功 (LVGL + GC9A01 + PicoPixel)");
+    ESP_LOGI(TAG, "显示初始化成功");
     return ESP_OK;
 }
 
-// =============================================================================
-// Backlight control
-// =============================================================================
+/* =========================================================================
+ * Backlight control (RST pin doubles as backlight power on this module)
+ * ========================================================================= */
 void display_backlight_on(void)
 {
     gpio_set_level(GPIO_LCD_RST, 1);
@@ -298,389 +405,205 @@ void display_backlight_on(void)
 
 void display_backlight_off(void)
 {
-    // 息屏前停止动画和timer，避免引用已删除的对象
-    // 不要调用 lv_obj_clean()，这会触发 LVGL 重绘，而马上又要 display_deinit()
     if (is_initialized && disp_handle) {
         lvgl_port_lock(0);
         if (colon_blink_timer) {
             lv_timer_del(colon_blink_timer);
             colon_blink_timer = NULL;
         }
-        lv_anim_del(NULL, NULL);  // 停止所有动画
+        lv_anim_del(NULL, NULL);
         lvgl_port_unlock();
     }
     gpio_set_level(GPIO_LCD_RST, 0);
 }
 
-// =============================================================================
-// Screen switching functions (PicoPixel UI)
-// =============================================================================
-
-// =============================================================================
-// 天气图标映射表
-// =============================================================================
-// Weather icon declarations (from images.h)
-#include "images.h"
-
-// 天气代码转图标指针
-static const lv_img_dsc_t* weather_code_to_icon(int16_t code)
+/* =========================================================================
+ * Display de-initialization (strict order to avoid ISR use-after-free)
+ * =========================================================================
+ *
+ * Correct tear-down order:
+ *   1. Stop LVGL timers / animations
+ *   2. lvgl_port_remove_disp(disp_handle)    — disconnect LVGL from panel
+ *   3. lvgl_port_deinit()                    — stop LVGL task
+ *   4. esp_lcd_panel_del(panel_handle)       — uninstall panel driver
+ *   5. esp_lcd_panel_io_del(panel_io_handle) — de-register from SPI bus
+ *   6. delay 30 ms                            — drain in-flight DMA/ISRs
+ *   7. spi_bus_free(SPI2_HOST)                — release SPI bus
+ *   8. free icon buffer, unregister spiffs
+ */
+void display_deinit(void)
 {
-    switch (code) {
-        case 100: return &weather_100;
-        case 101: return &weather_101;
-        case 102: return &weather_102;
-        case 103: return &weather_103;
-        case 104: return &weather_104;
-        case 300: case 301: return &weather_300;
-        case 302: case 303: case 304: return &weather_302;
-        case 305: case 309: return &weather_305;
-        case 306: return &weather_306;
-        case 307: case 308: case 310: case 311: case 312: case 313: return &weather_307;
-        case 400: return &weather_400;
-        case 401: case 408: return &weather_401;
-        case 402: case 403: case 409: case 410: return &weather_402;
-        case 404: case 405: case 406: case 407: return &weather_404;
-        case 500: case 502: case 503: case 504: case 514: case 515: return &weather_501;
-        case 501: return &weather_501;
-        case 507: case 508: case 509: case 510: return &weather_511;
-        case 511: case 512: case 513: return &weather_511;
-        default: return &weather_100;  // 默认晴
+    if (!is_initialized) return;
+
+    ESP_LOGI(TAG, "正在反初始化显示...");
+
+    /* 1 */
+    lvgl_port_lock(0);
+    if (colon_blink_timer) {
+        lv_timer_del(colon_blink_timer);
+        colon_blink_timer = NULL;
     }
-}
+    lv_anim_del(NULL, NULL);
+    lvgl_port_unlock();
 
-// =============================================================================
-// Colon blink timer callback — 负责时间标签的冒号闪烁 + 文本渲染
-// display_main_screen 只更新 last_hour/last_minute/last_wday，不直接写 label_time
-// =============================================================================
-static void colon_blink_timer_cb(lv_timer_t *timer)
-{
-    (void)timer;
-    colon_visible = !colon_visible;
-    if (objects.label_time) {
-        char buf[32];
-        const char* sep = colon_visible ? ":" : " ";
-        snprintf(buf, sizeof(buf), "%02d%s%02d  %d", last_hour, sep, last_minute, last_wday);
-        lv_label_set_text(objects.label_time, buf);
+    /* 2, 3 */
+    if (disp_handle) {
+        lvgl_port_remove_disp(disp_handle);
+        disp_handle = NULL;
     }
+    lvgl_port_deinit();
+
+    /* 4, 5 */
+    if (panel_handle) {
+        esp_lcd_panel_del(panel_handle);
+        panel_handle = NULL;
+    }
+    if (panel_io_handle) {
+        esp_lcd_panel_io_del(panel_io_handle);
+        panel_io_handle = NULL;
+    }
+
+    /* 6 */
+    vTaskDelay(pdMS_TO_TICKS(30));
+
+    /* 7 */
+    spi_bus_free(SPI2_HOST);
+
+    /* 8 */
+    if (cached_weather_icon.pixel_buf) {
+        free(cached_weather_icon.pixel_buf);
+        cached_weather_icon.pixel_buf = NULL;
+    }
+    memset(&cached_weather_icon, 0, sizeof(cached_weather_icon));
+    esp_vfs_spiffs_unregister("spiffs");
+
+    is_initialized = false;
+    ESP_LOGI(TAG, "显示反初始化完成");
 }
 
-// =============================================================================
-// Label breathe animation callback
-// 签名必须是 lv_anim_exec_xcb_t 即 void*(var), int32_t(v)
-// 否则 lv_anim_del / lv_anim_start 的类型匹配会出问题
-// =============================================================================
-static void label_breathe_anim_cb(void *var, int32_t v)
-{
-    lv_obj_t *obj = (lv_obj_t *)var;
-    lv_obj_set_style_text_opa(obj, (lv_opa_t)v, LV_PART_MAIN | LV_STATE_DEFAULT);
-}
-
-// =============================================================================
-// Weather icon animation callbacks
-// =============================================================================
-
-// 上下浮动动画（默认）
+/* =========================================================================
+ * Animation callbacks
+ * ========================================================================= */
 static void icon_float_anim_cb(void *var, int32_t v)
 {
     lv_obj_t *obj = (lv_obj_t *)var;
     lv_obj_set_y(obj, v);
 }
 
-// 左右移动动画（云彩类）
 static void icon_sway_anim_cb(void *var, int32_t v)
 {
     lv_obj_t *obj = (lv_obj_t *)var;
     lv_obj_set_x(obj, v);
 }
 
-// 旋转动画（中心对称类）
 static void icon_rotate_anim_cb(void *var, int32_t v)
 {
     lv_obj_t *obj = (lv_obj_t *)var;
     lv_img_set_angle(obj, v);
 }
 
-// Arc rotation animation callback
-static void arc_rotation_anim_cb(void *var, int32_t v)
+static void label_breathe_anim_cb(void *var, int32_t v)
 {
     lv_obj_t *obj = (lv_obj_t *)var;
-    lv_arc_set_rotation(obj, v);
+    lv_obj_set_style_text_opa(obj, (lv_opa_t)v, LV_PART_MAIN | LV_STATE_DEFAULT);
 }
 
-// =============================================================================
-// 根据天气代码判断动画类型
-// =============================================================================
-// 旋转动画：只有 100(晴) 和 499
-static bool is_rotating_icon(int16_t code)
+static void arc_phase1_cb(void *var, int32_t v)
 {
-    return (code == 100 || code == 499);
+    lv_obj_t *obj = (lv_obj_t *)var;
+    lv_arc_set_start_angle(obj, 270);
+    lv_arc_set_end_angle(obj, 270 + v);
 }
 
-// 左右移动动画：所有带云彩的图形
-static bool is_swaying_icon(int16_t code)
+static void arc_phase2_cb(void *var, int32_t v)
 {
-    return ((code >= 101 && code <= 104) ||   // 多云/阴
-            (code == 151) ||                   // 晴间多云(夜间)
-            (code >= 300 && code <= 313) ||   // 各种雨
-            (code >= 400 && code <= 403) ||   // 小雪/中雪/大雪/暴雪
-            (code >= 407 && code <= 410) ||   // 阵雪/小到中雪/中到大雪/大到暴雪
-            (code >= 500 && code <= 515) ||   // 雾/霾
-            (code == 350) || (code == 351));  // 特殊阵雨
+    lv_obj_t *obj = (lv_obj_t *)var;
+    lv_arc_set_start_angle(obj, v);
+    lv_arc_set_end_angle(obj, v + 60);
 }
 
-// 上下浮动动画：其他（雷暴等）
-// 默认就是浮动，不需要额外判断
-
-void display_main_screen(int hour, int minute, const char* weather_text,
-                         int temperature, uint32_t last_update, int16_t weather_code,
-                         uint8_t humidity, uint8_t wind_scale)
+static void arc_phase1_ready_cb(lv_anim_t *a)
 {
-    if (!is_initialized || !disp_handle) return;
-
-    lvgl_port_lock(0);
-    loadScreen(SCREEN_ID_BADGE_MAIN);
-
-    // Save time state for colon blink timer
-    last_hour = hour;
-    last_minute = minute;
-    time_t now;
-    time(&now);
-    struct tm* tm_info = localtime(&now);
-    int wday = tm_info->tm_wday;
-    last_wday = (wday == 0) ? 7 : wday;
-
-    // === 1. 更新时间（Montserrat 24px，纯数字不需要中文字体）===
-    // 注意：label_time 的文本由 colon_blink_timer 负责更新（冒号闪烁效果）
-    // 这里只更新 font + 立即刷新一次显示，避免500ms空白
-    if (objects.label_time) {
-        lv_obj_set_style_text_font(objects.label_time, &lv_font_montserrat_24, 0);
-        // 立即渲染一次，不要等下一个 timer 周期
-        char buf[32];
-        const char* sep = colon_visible ? ":" : " ";
-        snprintf(buf, sizeof(buf), "%02d%s%02d  %d", hour, sep, minute, last_wday);
-        lv_label_set_text(objects.label_time, buf);
-        ESP_LOGI(TAG, "[UI] label_time: \"%s\"", buf);
-    }
-
-    // Start colon blink timer if not already running (500ms = 2Hz blink)
-    if (colon_blink_timer == NULL) {
-        colon_blink_timer = lv_timer_create(colon_blink_timer_cb, 500, NULL);
-        ESP_LOGI(TAG, "[动画] 冒号闪烁 timer 已创建 (500ms)");
-    }
-
-    // === 2. 更新日期（Montserrat 18px，纯数字+点号不需要中文字体）===
-    if (objects.label_date) {
-        lv_obj_set_style_text_font(objects.label_date, &lv_font_montserrat_18, 0);
-        char date_buf[32];
-        snprintf(date_buf, sizeof(date_buf), "%d.%d.%d",
-                 tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday);
-        lv_label_set_text(objects.label_date, date_buf);
-        ESP_LOGI(TAG, "[UI] label_date: \"%s\"", date_buf);
-    }
-
-    // === 3. 更新天气图标 ===
-    if (objects.qweather_icons) {
-        const lv_img_dsc_t* icon = weather_code_to_icon(weather_code);
-        lv_img_set_src(objects.qweather_icons, icon);
-        ESP_LOGI(TAG, "[UI] qweather_icons: weather_code=%d", weather_code);
-    }
-
-    // === 4. 更新天气文字（基于 weather_code，避免 API 返回的中文缺字） ===
-    if (objects.label_weather) {
-        lv_obj_set_style_text_font(objects.label_weather, &lv_font_simsun_16_cjk, 0);
-        const char* safe_name = get_weather_name(weather_code);
-        lv_label_set_text(objects.label_weather, safe_name);
-        ESP_LOGI(TAG, "[UI] label_weather: \"%s\" (code=%d, orig=\"%s\")",
-                 safe_name, weather_code, weather_text ? weather_text : "(null)");
-    }
-
-    // === 5. 更新温度（"度"在字体中，℃符号不在）===
-    if (objects.label_temp) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d C", temperature);
-        lv_label_set_text(objects.label_temp, buf);
-        ESP_LOGI(TAG, "[UI] label_temp: \"%s\"", buf);
-    }
-
-    // === 6. 更新详细信息（湿度、风力 - 用英文避免中文缺字）===
-    if (objects.label_detail) {
-        lv_obj_set_style_text_font(objects.label_detail, &lv_font_simsun_16_cjk, 0);
-        char detail_buf[64];
-        snprintf(detail_buf, sizeof(detail_buf), "Hum:%d%% Wind:%d", humidity, wind_scale);
-        lv_label_set_text(objects.label_detail, detail_buf);
-        ESP_LOGI(TAG, "[UI] label_detail: \"%s\"", detail_buf);
-    }
-
-    // === 7. 更新最后更新时间 ===
-    if (objects.label_update) {
-        lv_obj_set_style_text_font(objects.label_update, &lv_font_simsun_16_cjk, 0);
-        if (last_update > 0) {
-            time_t update_time = (time_t)last_update;
-            struct tm* utm = localtime(&update_time);
-            char update_buf[64];
-            snprintf(update_buf, sizeof(update_buf), "%d.%d.%d %02d:%02d更新",
-                     utm->tm_year + 1900, utm->tm_mon + 1, utm->tm_mday,
-                     utm->tm_hour, utm->tm_min);
-            lv_label_set_text(objects.label_update, update_buf);
-            ESP_LOGI(TAG, "[UI] label_update: \"%s\"", update_buf);
-        } else {
-            lv_label_set_text(objects.label_update, "未更新");
-            ESP_LOGI(TAG, "[UI] label_update: \"未更新\"");
-        }
-    }
-
-    // === 8. Start/update animations ===
-    // label_update 呼吸动画：用正确的2参数回调 + 先清旧动画
-    if (objects.label_update) {
-        lv_anim_del(objects.label_update, label_breathe_anim_cb);
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, objects.label_update);
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)label_breathe_anim_cb);
-        lv_anim_set_values(&a, 60, 255);  // 明显的明暗变化
-        lv_anim_set_time(&a, 500);
-        lv_anim_set_playback_time(&a, 500);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_start(&a);
-        ESP_LOGI(TAG, "[动画] label_update 呼吸动画已启动 (1秒周期)");
-    }
-
-    // 天气图标动画：根据天气类型选择不同动画效果
-    if (objects.qweather_icons) {
-        // 先清除所有可能的旧动画
-        lv_anim_del(objects.qweather_icons, icon_float_anim_cb);
-        lv_anim_del(objects.qweather_icons, icon_sway_anim_cb);
-        lv_anim_del(objects.qweather_icons, icon_rotate_anim_cb);
-
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, objects.qweather_icons);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-
-        if (is_rotating_icon(weather_code)) {
-            // 旋转动画：中心对称图形（晴、雪）
-            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)icon_rotate_anim_cb);
-            lv_anim_set_values(&a, 0, 3600);  // 0° -> 360° (LVGL角度单位是0.1度)
-            lv_anim_set_time(&a, 8000);       // 8秒转一圈，缓慢优雅
-            ESP_LOGI(TAG, "[动画] 天气图标旋转已启动 (8秒周期, code=%d)", weather_code);
-        } else if (is_swaying_icon(weather_code)) {
-            // 左右移动动画：带云彩的图形
-            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)icon_sway_anim_cb);
-            lv_anim_set_values(&a, 91, 97);   // x: 91 -> 97 -> 91 (±3px)
-            lv_anim_set_time(&a, 3000);       // 3秒一个来回
-            lv_anim_set_playback_time(&a, 3000);
-            ESP_LOGI(TAG, "[动画] 天气图标左右移动已启动 (6秒周期, code=%d)", weather_code);
-        } else {
-            // 上下浮动动画：其他图形（雷暴等）
-            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)icon_float_anim_cb);
-            lv_anim_set_values(&a, 80, 86);   // y: 80 -> 86 -> 80 (±3px)
-            lv_anim_set_time(&a, 2000);       // 2秒一个来回
-            lv_anim_set_playback_time(&a, 2000);
-            ESP_LOGI(TAG, "[动画] 天气图标上下浮动已启动 (4秒周期, code=%d)", weather_code);
-        }
-
-        lv_anim_start(&a);
-    }
-
-    lvgl_port_unlock();
-
-    ESP_LOGI(TAG, "主屏幕: %02d:%02d %s %dC Hum:%d%% Wind:%d",
-             hour, minute, weather_text ? weather_text : "--", temperature,
-             humidity, wind_scale);
+    lv_obj_t *obj = (lv_obj_t *)a->var;
+    lv_anim_t a2;
+    lv_anim_init(&a2);
+    lv_anim_set_var(&a2, obj);
+    lv_anim_set_values(&a2, 0, 360);
+    lv_anim_set_time(&a2, 3000);
+    lv_anim_set_repeat_count(&a2, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_exec_cb(&a2, arc_phase2_cb);
+    lv_anim_start(&a2);
 }
 
-void display_loading(const char* message)
+/* =========================================================================
+ * Loading screen (shown while fetching WiFi / weather data)
+ * ========================================================================= */
+void display_loading(const char *message)
 {
     if (!is_initialized || !disp_handle) return;
 
     lvgl_port_lock(0);
+    lv_anim_del(NULL, NULL);
     loadScreen(SCREEN_ID_BADGE_LOADING);
+    lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
+    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
 
-    // 设置中间的状态标签
     if (objects.label_1) {
-        lv_obj_set_style_text_font(objects.label_1, &lv_font_simsun_16_cjk, 0);
-        if (message && strlen(message) > 0) {
-            lv_label_set_text(objects.label_1, message);
-        } else {
-            lv_label_set_text(objects.label_1, "同步中...");
-        }
+        lv_obj_set_style_text_font(objects.label_1, &lv_font_simsun_16_cjk,
+                                   LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(objects.label_1, lv_color_white(),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_opa(objects.label_1, LV_OPA_COVER,
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        if (message) lv_label_set_text(objects.label_1, message);
     }
 
-    // 配置 Arc: 更小的弧段 + 旋转动画
-    // 原始 screens.c 把 value 设成 359 (整圈)，看不出在转动
-    // 这里改成 60° 的短弧，背景轨道淡化，然后旋转整个 arc 让它转起来
+    /* Two-phase arc: fill 0→360°, then spin a 60° slice forever */
     if (objects.arc_1) {
-        // 指示器覆盖 60° 的扇形弧（范围 0-360，值=60）
-        lv_arc_set_value(objects.arc_1, 60);
-        // 从 0 度开始（把起点放到顶部偏右一点视觉更自然）
-        lv_arc_set_rotation(objects.arc_1, 0);
-        // 背景轨道淡化 —— 让旋转的弧段更明显
-        lv_obj_set_style_arc_opa(objects.arc_1, 50, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-        // 启动旋转动画：从 0° 转到 360°，约 1.5 秒一圈，无限重复
         lv_anim_t a;
         lv_anim_init(&a);
         lv_anim_set_var(&a, objects.arc_1);
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)arc_rotation_anim_cb);
         lv_anim_set_values(&a, 0, 360);
-        lv_anim_set_time(&a, 1500);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_time(&a, 3000);
+        lv_anim_set_repeat_count(&a, 0);
+        lv_anim_set_exec_cb(&a, arc_phase1_cb);
+        lv_anim_set_ready_cb(&a, arc_phase1_ready_cb);
         lv_anim_start(&a);
     }
-
     lvgl_port_unlock();
 }
 
-void display_loading_status(const char* status)
+void display_loading_status(const char *status)
 {
     if (!is_initialized || !disp_handle) return;
-    if (!status || strlen(status) == 0) return;
 
     lvgl_port_lock(0);
     if (objects.label_1) {
-        lv_obj_set_style_text_font(objects.label_1, &lv_font_simsun_16_cjk, 0);
+        lv_obj_set_style_text_font(objects.label_1, &lv_font_simsun_16_cjk,
+                                   LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(objects.label_1, lv_color_white(),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_opa(objects.label_1, LV_OPA_COVER,
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_label_set_text(objects.label_1, status);
     }
     lvgl_port_unlock();
 }
 
+/* =========================================================================
+ * Config mode screen
+ * ========================================================================= */
 void display_config_mode(void)
 {
     if (!is_initialized || !disp_handle) return;
 
     lvgl_port_lock(0);
+    lv_anim_del(NULL, NULL);
     loadScreen(SCREEN_ID_BADGE_CONFIG);
-
-    // 设置中文字体并更新文字
-    if (objects.label_4) {
-        lv_obj_set_style_text_font(objects.label_4, &lv_font_simsun_16_cjk, 0);
-        lv_label_set_text(objects.label_4, "配置模式");
-    }
-    if (objects.label_5) {
-        lv_obj_set_style_text_font(objects.label_5, &lv_font_simsun_16_cjk, 0);
-        lv_label_set_text(objects.label_5, "WAKE");
-    }
-    if (objects.label_6) {
-        lv_obj_set_style_text_font(objects.label_6, &lv_font_simsun_16_cjk, 0);
-        lv_label_set_text(objects.label_6, "WECHAT");
-    }
-    if (objects.label_7) {
-        lv_obj_set_style_text_font(objects.label_7, &lv_font_simsun_16_cjk, 0);
-        lv_label_set_text(objects.label_7, "SCAN");
-    }
-
-    // 启动 Arc 旋转动画
-    if (objects.arc_3) {
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, objects.arc_3);
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)arc_rotation_anim_cb);
-        lv_anim_set_values(&a, 0, 360);
-        lv_anim_set_time(&a, 1000);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_start(&a);
-    }
-
+    lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
+    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
     lvgl_port_unlock();
 }
 
@@ -689,104 +612,355 @@ void display_config_success(void)
     if (!is_initialized || !disp_handle) return;
 
     lvgl_port_lock(0);
+    lv_anim_del(NULL, NULL);
     loadScreen(SCREEN_ID_BADGE_SUCCESS);
-
-    // 设置中文字体并更新文字
-    if (objects.label_2) {
-        lv_obj_set_style_text_font(objects.label_2, &lv_font_simsun_16_cjk, 0);
-        lv_label_set_text(objects.label_2, "配置成功");
-    }
-    if (objects.label_3) {
-        lv_obj_set_style_text_font(objects.label_3, &lv_font_simsun_16_cjk, 0);
-        lv_label_set_text(objects.label_3, "PRESS TO");
-    }
-
+    lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
+    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
     lvgl_port_unlock();
 }
 
-// =============================================================================
-// display_screensaver - Show simple clock before sleep
-// =============================================================================
+/* =========================================================================
+ * Screensaver (shown before entering deep-sleep)
+ * ========================================================================= */
 void display_screensaver(int hour, int minute)
 {
     if (!is_initialized || !disp_handle) return;
 
     lvgl_port_lock(0);
-
-    // 获取当前屏幕并清空
     lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
     lv_obj_clean(scr);
-
-    // 黑色背景
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    // 大号时间显示（48px，需在 sdkconfig 中启用 LV_FONT_MONTSERRAT_48）
-    lv_obj_t *label_time = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_time, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(label_time, lv_color_white(), 0);
-    lv_obj_align(label_time, LV_ALIGN_CENTER, 0, -15);
-
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%02d:%02d", hour, minute);
-    lv_label_set_text(label_time, buf);
-
-    // 底部小字提示
-    lv_obj_t *label_hint = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(label_hint, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_align(label_hint, LV_ALIGN_BOTTOM_MID, 0, -20);
-    lv_label_set_text(label_hint, "Press WAKE");
-
-    lvgl_port_unlock();
-
-    ESP_LOGI(TAG, "屏保已显示: %02d:%02d", hour, minute);
-}
-
-// =============================================================================
-// display_deinit - Cleanup
-// =============================================================================
-void display_deinit(void)
-{
-    if (!is_initialized) return;
-
-    ESP_LOGI(TAG, "反初始化显示...");
-
-    // Step 1: 停止所有 LVGL 动画和 timer
     if (colon_blink_timer) {
         lv_timer_del(colon_blink_timer);
         colon_blink_timer = NULL;
     }
     lv_anim_del(NULL, NULL);
 
-    // Step 2: 在 LVGL task 还在运行时，先安全移除显示
-    // 必须在 lvgl_port_deinit() 之前做，否则 LVGL 已被销毁
-    if (disp_handle) {
-        lvgl_port_lock(0);
-        lvgl_port_remove_disp(disp_handle);
-        lvgl_port_unlock();
-        disp_handle = NULL;
+    lv_obj_t *label_time = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_time, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(label_time, lv_color_white(), 0);
+    lv_obj_set_style_text_align(label_time, LV_TEXT_ALIGN_CENTER, 0);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", hour, minute);
+    lv_label_set_text(label_time, buf);
+    lv_obj_center(label_time);
+
+    lv_obj_t *label_hint = lv_label_create(scr);
+    lv_obj_set_style_text_font(label_hint, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(label_hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_label_set_text(label_hint, "Press WAKE");
+    lv_obj_align(label_hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    lvgl_port_unlock();
+}
+
+/* =========================================================================
+ * Weather name (English fallback, ~12 chars max for UI labels)
+ * ========================================================================= */
+/* =========================================================================
+ * Weather name lookup — Chinese preferred, English fallback
+ * =========================================================================
+ *
+ * Priority:
+ *   1. Chinese name if ALL characters are in lv_font_simsun_16_cjk
+ *   2. English name otherwise
+ * ========================================================================= */
+#include "font_chars.h"
+
+static const char *get_weather_name(int16_t code)
+{
+    /* Chinese names — checked against font at runtime */
+    static const struct { int16_t code; const char *cn; const char *en; } table[] = {
+        {100, "晴",       "Sunny"},
+        {101, "多云",     "Cloudy"},
+        {102, "少云",     "Few Clouds"},
+        {103, "晴间多云", "Partly Cloudy"},
+        {104, "阴",       "Overcast"},
+        {150, "晴",       "Sunny"},
+        {151, "多云",     "Cloudy"},
+        {152, "少云",     "Few Clouds"},
+        {153, "晴间多云", "Partly Cloudy"},
+        {300, "阵雨",     "Shower"},
+        {301, "强阵雨",   "Heavy Shower"},
+        {302, "雷阵雨",   "Thunderstorm"},
+        {303, "强雷阵雨", "Heavy Thunderstorm"},
+        {304, "冰雹",     "Hail"},
+        {305, "小雨",     "Light Rain"},
+        {306, "中雨",     "Moderate Rain"},
+        {307, "大雨",     "Heavy Rain"},
+        {308, "极端降雨", "Extreme Rain"},
+        {309, "毛毛雨",   "Drizzle"},
+        {310, "暴雨",     "Storm"},
+        {311, "大暴雨",   "Heavy Storm"},
+        {312, "特大暴雨", "Severe Storm"},
+        {313, "冻雨",     "Freezing Rain"},
+        {314, "小到中雨", "Light-Moderate Rain"},
+        {315, "中到大雨", "Moderate-Heavy Rain"},
+        {316, "大到暴雨", "Heavy-Storm Rain"},
+        {317, "暴雨到大暴雨", "Storm-Heavy Storm"},
+        {318, "大暴雨到特大暴雨", "Heavy-Severe Storm"},
+        {350, "阵雨",     "Shower"},
+        {351, "强阵雨",   "Heavy Shower"},
+        {399, "雨",       "Rain"},
+        {400, "小雪",     "Light Snow"},
+        {401, "中雪",     "Moderate Snow"},
+        {402, "大雪",     "Heavy Snow"},
+        {403, "暴雪",     "Blizzard"},
+        {404, "雨夹雪",   "Sleet"},
+        {405, "雨雪天气", "Rain-Snow Mix"},
+        {406, "雨夹雪",   "Rain-Sleet"},
+        {407, "阵雪",     "Snow Shower"},
+        {408, "中雪",     "Moderate Snow"},
+        {409, "大雪",     "Heavy Snow"},
+        {410, "暴雪",     "Blizzard"},
+        {456, "雨夹雪",   "Rain-Sleet"},
+        {457, "阵雪",     "Snow Shower"},
+        {499, "雪",       "Snow"},
+        {500, "薄雾",     "Mist"},
+        {501, "雾",       "Foggy"},
+        {502, "霾",       "Haze"},
+        {503, "扬沙",     "Sand"},
+        {504, "浮尘",     "Dust"},
+        {507, "沙尘暴",   "Sandstorm"},
+        {508, "强沙尘暴", "Severe Sandstorm"},
+        {509, "浓雾",     "Dense Fog"},
+        {510, "强浓雾",   "Strong Fog"},
+        {511, "中度霾",   "Moderate Haze"},
+        {512, "重度霾",   "Heavy Haze"},
+        {513, "严重霾",   "Severe Haze"},
+        {514, "大雾",     "Heavy Fog"},
+        {515, "特强浓雾", "Extra Heavy Fog"},
+    };
+
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (table[i].code == code) {
+            /* Use Chinese only if font supports ALL chars */
+            if (font_supports_chinese(table[i].cn)) {
+                return table[i].cn;
+            }
+            return table[i].en;
+        }
+    }
+    return "Unknown";
+}
+
+/* =========================================================================
+ * Icon rotation correction (some source PNGs are pre-rotated)
+ * ========================================================================= */
+static int16_t icon_rotation_correction(int16_t code)
+{
+    if (code == 101) return -900;   /* "多云" PNG is rotated 90° */
+    return 0;
+}
+
+/* =========================================================================
+ * Weekday name (Chinese: 周一 ~ 周日)
+ * ========================================================================= */
+static const char *wday_name(int wday)
+{
+    static const char *names[] = {
+        "周日", "周一", "周二", "周三", "周四", "周五", "周六"
+    };
+    if (wday < 0 || wday > 6) return "未知";
+    return names[wday];
+}
+
+/* =========================================================================
+ * Colon blink timer callback
+ * ========================================================================= */
+static void colon_blink_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    colon_visible = !colon_visible;
+    if (objects.label_time) {
+        char buf[48];
+        const char *sep = colon_visible ? ":" : " ";
+        snprintf(buf, sizeof(buf), "%02d%s%02d  %s",
+                 last_hour, sep, last_minute, wday_name(last_wday));
+        lv_label_set_text(objects.label_time, buf);
+    }
+}
+
+/* =========================================================================
+ * Main screen — update time / icon / weather / details.
+ * =========================================================================
+ *
+ * Icon loading happens OUTSIDE lvgl_port_lock (pure fread + malloc, no LVGL
+ * calls). Inside the lock we only do lv_img_set_src and styling — fast.
+ * ========================================================================= */
+void display_main_screen(int hour, int minute, int wday,
+                         int16_t weather_code, const char *weather_text,
+                         int8_t temperature, uint8_t humidity, uint8_t wind_scale,
+                         const char *update_time_str)
+{
+    if (!is_initialized || !disp_handle) return;
+
+    /* --- Pre-load icon OUTSIDE lvgl_port_lock (no LVGL calls here) --- */
+    if (!cached_weather_icon.valid || cached_weather_icon.code != weather_code) {
+        ESP_LOGI(TAG, "[主界面] 加载天气图标 code=%d", weather_code);
+        esp_err_t icon_err = display_prepare_weather_icon(weather_code);
+        if (icon_err != ESP_OK) {
+            ESP_LOGW(TAG, "[主界面] 图标加载失败: %s (code=%d)",
+                     esp_err_to_name(icon_err), weather_code);
+            /* Continue without icon — screen will still show time/weather text */
+        }
     }
 
-    // Step 3: 停止 LVGL task（设置 running=false，task 会自我退出）
-    lvgl_port_deinit();
+    /* --- Everything LVGL happens INSIDE the port lock --- */
+    lvgl_port_lock(0);
 
-    // 等待 LVGL task 完全退出并自我删除
-    vTaskDelay(pdMS_TO_TICKS(100));
+    lv_anim_del(NULL, NULL);
 
-    // Step 4: 删除硬件资源
-    if (panel_handle) {
-        esp_lcd_panel_del(panel_handle);
-        panel_handle = NULL;
+    /* Only load screen if not already on main screen — avoids fade-in
+     * animation delay which can cause black screen on first boot */
+    lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
+    if (!act || act != objects.badge_main) {
+        loadScreen(SCREEN_ID_BADGE_MAIN);
+        act = lv_disp_get_scr_act(disp_handle);
+    }
+    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
+
+    /* Time + colon blink timer */
+    if (objects.label_time) {
+        /* Use simsun font so Chinese weekday (周一~周日) renders correctly */
+        lv_obj_set_style_text_font(objects.label_time, &lv_font_simsun_16_cjk, 0);
+        lv_obj_set_style_text_color(objects.label_time, lv_color_white(), 0);
+        last_hour = hour;
+        last_minute = minute;
+        last_wday = wday;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%02d:%02d  %s", hour, minute, wday_name(wday));
+        lv_label_set_text(objects.label_time, buf);
+
+        if (colon_blink_timer) lv_timer_del(colon_blink_timer);
+        colon_blink_timer = lv_timer_create(colon_blink_timer_cb, 500, NULL);
     }
 
-    if (io_handle) {
-        esp_lcd_panel_io_del(io_handle);
-        io_handle = NULL;
+    /* Date */
+    if (objects.label_date) {
+        lv_obj_set_style_text_font(objects.label_date, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(objects.label_date, lv_color_white(), 0);
+        char date_buf[32];
+        snprintf(date_buf, sizeof(date_buf), "%d.%d.%d", 2026, 6, 10);
+        lv_label_set_text(objects.label_date, date_buf);
     }
 
-    spi_bus_free(SPI2_HOST);
+    /* Weather icon */
+    if (objects.qweather_icons) {
+        if (cached_weather_icon.valid) {
+            lv_img_set_src(objects.qweather_icons, &cached_weather_icon.dsc);
+            ESP_LOGI(TAG, "[UI] 图标: 使用缓存 (%ux%u, code=%d)",
+                     (unsigned)cached_weather_icon.dsc.header.w,
+                     (unsigned)cached_weather_icon.dsc.header.h,
+                     weather_code);
+        } else {
+            ESP_LOGW(TAG, "[UI] 图标缓存无效 (code=%d)", weather_code);
+        }
 
-    is_initialized = false;
-    ESP_LOGI(TAG, "显示反初始化完成");
+        int16_t correction = icon_rotation_correction(weather_code);
+        if (correction != 0) {
+            lv_img_set_angle(objects.qweather_icons,
+                             (int16_t)(correction + 3600));
+        } else {
+            lv_img_set_angle(objects.qweather_icons, 0);
+        }
+    }
+
+    /* Weather description */
+    if (objects.label_weather) {
+        lv_obj_set_style_text_font(objects.label_weather, &lv_font_simsun_16_cjk, 0);
+        lv_obj_set_style_text_color(objects.label_weather, lv_color_white(), 0);
+        /* Use API weather_text only if font supports ALL chars;
+         * otherwise fall back to get_weather_name() which returns
+         * Chinese if supported or English otherwise. */
+        if (weather_text && weather_text[0] != '\0' &&
+            font_supports_chinese(weather_text)) {
+            lv_label_set_text(objects.label_weather, weather_text);
+        } else {
+            lv_label_set_text(objects.label_weather, get_weather_name(weather_code));
+        }
+    }
+
+    /* Temperature */
+    if (objects.label_temp) {
+        lv_obj_set_style_text_color(objects.label_temp, lv_color_white(), 0);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d°C", temperature);
+        lv_label_set_text(objects.label_temp, buf);
+    }
+
+    /* Humidity / wind */
+    if (objects.label_detail) {
+        lv_obj_set_style_text_font(objects.label_detail, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(objects.label_detail, lv_color_white(), 0);
+        char detail_buf[48];
+        snprintf(detail_buf, sizeof(detail_buf), "Hum:%d%% Wind:%d",
+                 humidity, wind_scale);
+        lv_label_set_text(objects.label_detail, detail_buf);
+    }
+
+    /* Update-time label (breathing animation) */
+    if (objects.label_update) {
+        lv_obj_set_style_text_font(objects.label_update, &lv_font_simsun_16_cjk, 0);
+        lv_obj_set_style_text_color(objects.label_update, lv_color_white(), 0);
+        lv_label_set_text(objects.label_update, update_time_str);
+
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, objects.label_update);
+        lv_anim_set_values(&a, LV_OPA_30, LV_OPA_100);
+        lv_anim_set_time(&a, 1000);
+        lv_anim_set_playback_time(&a, 1000);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_exec_cb(&a, label_breathe_anim_cb);
+        lv_anim_start(&a);
+    }
+
+    /* --- Icon motion animation (rotate/sway/float depending on code) --- */
+    lv_anim_del(objects.qweather_icons, NULL);
+    {
+        int16_t code = weather_code;
+        if (code == 100 || code == 499) {
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, objects.qweather_icons);
+            lv_anim_set_values(&a, 0, 3600);
+            lv_anim_set_time(&a, 6000);
+            lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+            lv_anim_set_exec_cb(&a, icon_rotate_anim_cb);
+            lv_anim_start(&a);
+        } else if (code == 101 || code == 151 || code == 103 || code == 153 ||
+                   (code >= 300 && code <= 318) || code == 399 ||
+                   (code >= 400 && code <= 410) || code == 499) {
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, objects.qweather_icons);
+            lv_anim_set_values(&a, 78, 82);
+            lv_anim_set_time(&a, 3000);
+            lv_anim_set_playback_time(&a, 3000);
+            lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+            lv_anim_set_exec_cb(&a, icon_sway_anim_cb);
+            lv_anim_start(&a);
+        } else {
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, objects.qweather_icons);
+            lv_anim_set_values(&a, 70, 74);
+            lv_anim_set_time(&a, 2000);
+            lv_anim_set_playback_time(&a, 2000);
+            lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+            lv_anim_set_exec_cb(&a, icon_float_anim_cb);
+            lv_anim_start(&a);
+        }
+    }
+
+    lvgl_port_unlock();
+
+    ESP_LOGI(TAG, "主屏幕: %02d:%02d %s %d°C Hum:%d%% Wind:%d",
+             hour, minute, get_weather_name(weather_code),
+             temperature, humidity, wind_scale);
 }

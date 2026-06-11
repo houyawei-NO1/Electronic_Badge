@@ -3,6 +3,7 @@
  * @brief Weather API implementation (和风天气)
  */
 #include <string.h>
+#include <stdlib.h>
 #include <time.h>
 #include "weather.h"
 #include "config.h"
@@ -285,10 +286,61 @@ if (resp_info->is_gzip) {
         data->weather_code = atoi(value_buf);
     }
 
-    // Get update time
-    time_t now_time;
-    time(&now_time);
-    data->update_time = (uint32_t)now_time;
+    // Get update time from API response (obsTime field, ISO 8601 format: "2026-06-09T08:30+08:00")
+    // NTP on ESP32-C3 is unreliable/slow, so we use the weather API's server time as authoritative time.
+    time_t api_time = 0;
+    if (json_get_string(now_start, "obsTime", value_buf, sizeof(value_buf))) {
+        // Parse: "YYYY-MM-DDTHH:MM+TZ:00" or "YYYY-MM-DDTHH:MM:SS+TZ:00"
+        int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
+        int tz_hour = 8;  // default to +08:00
+        int parsed = sscanf(value_buf, "%4d-%2d-%2dT%2d:%2d:%2d+%2d:",
+                            &year, &month, &day, &hour, &min, &sec, &tz_hour);
+        if (parsed < 5) {
+            sec = 0;
+            parsed = sscanf(value_buf, "%4d-%2d-%2dT%2d:%2d+%2d:",
+                            &year, &month, &day, &hour, &min, &tz_hour);
+        }
+        if (parsed >= 5 && year > 2000) {
+            // Convert to UTC: obsTime is local time; subtract tz offset to get UTC
+            // Then compute Unix epoch using UTC via mktime with TZ=UTC0
+            struct tm t = {0};
+            t.tm_year = year - 1900;
+            t.tm_mon  = month - 1;
+            t.tm_mday = day;
+            t.tm_hour = hour;
+            t.tm_min  = min;
+            t.tm_sec  = sec;
+            // Normalize to UTC: obsTime in +tz_hour means UTC is tz_hour earlier
+            t.tm_hour -= tz_hour;
+            // Use UTC timezone for epoch computation, then restore
+            char old_tz[64] = "";
+            char* p_old_tz = getenv("TZ");
+            if (p_old_tz) strncpy(old_tz, p_old_tz, sizeof(old_tz) - 1);
+            setenv("TZ", "UTC0", 1);
+            tzset();
+            time_t raw_epoch = mktime(&t);
+            // Restore original TZ (usually empty → will fall back to UTC)
+            if (strlen(old_tz) > 0) {
+                setenv("TZ", old_tz, 1);
+            } else {
+                unsetenv("TZ");
+            }
+            tzset();
+            if (raw_epoch > (time_t)1577836800) {  // > 2020-01-01 = valid
+                api_time = raw_epoch;
+                ESP_LOGI(TAG, "API时间: %s -> UTC epoch=%lu", value_buf, (unsigned long)api_time);
+            }
+        }
+    }
+
+    // Use API time if available, otherwise fall back to system time
+    if (api_time > 0) {
+        data->update_time = (uint32_t)api_time;
+    } else {
+        time_t now_time;
+        time(&now_time);
+        data->update_time = (uint32_t)now_time;
+    }
 
     ESP_LOGI(TAG, "天气: %s, %d°C, 体感%d°C, 湿度%d%%, 风%s %d级, 气压%dhPa, 能见度%dkm",
              data->weather_text, data->temperature, data->feels_like,

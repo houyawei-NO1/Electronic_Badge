@@ -26,8 +26,8 @@
 
 // SPI Clock - 调试版使用GPIO0（经典款带串口芯片，GPIO20被占用）
 // 量产版(简约款)请改为: #define GPIO_SPI_SCK 20
-#define GPIO_SPI_SCK      0    // SCL (SPI Clock) - DEBUG VERSION
-// #define GPIO_SPI_SCK   20   // SCL (SPI Clock) - PRODUCTION VERSION
+// #define GPIO_SPI_SCK      0    // SCL (SPI Clock) - DEBUG VERSION
+#define GPIO_SPI_SCK   20   // SCL (SPI Clock) - PRODUCTION VERSION
 
 #define GPIO_SPI_MOSI     10   // SDA (SPI Data)
 #define GPIO_LCD_DC       7    // DC (Data/Command)
@@ -55,12 +55,19 @@
 #endif
 
 // =============================================================================
-// Sleep Configuration (from sdkconfig)
+// Low Power Mode Configuration
 // =============================================================================
+// Light sleep interval: 1 minute (time refresh period)
+#define LIGHT_SLEEP_INTERVAL_US   (60 * 1000000ULL)   // 1 minute
+
+// Weather update interval: 30 minutes (only in active/update mode)
+#define WEATHER_UPDATE_INTERVAL_US (30 * 60 * 1000000ULL)  // 30 minutes
+
+// Legacy deep sleep interval (kept for reference, no longer used)
 #ifdef CONFIG_UPDATE_INTERVAL_MINUTES
 #define SLEEP_INTERVAL_US     ((uint64_t)CONFIG_UPDATE_INTERVAL_MINUTES * 60 * 1000000ULL)
 #else
-#define SLEEP_INTERVAL_US     (30 * 60 * 1000000ULL)  // 30 minutes default
+#define SLEEP_INTERVAL_US     (30 * 60 * 1000000ULL)
 #endif
 
 // =============================================================================
@@ -72,8 +79,8 @@
 #define WIFI_MAX_CONFIGS   5
 #endif
 
-#define WIFI_CONNECT_TIMEOUT_MS  10000  // 10 seconds per config
-#define WIFI_MAX_RETRY     3            // Max retry attempts per config
+#define WIFI_CONNECT_TIMEOUT_MS  20000  // 20 seconds per config
+#define WIFI_MAX_RETRY     10           // Max retry attempts per config
 
 // SmartConfig timeout (5 minutes)
 #define SMARTCONFIG_TIMEOUT_MS  (5 * 60 * 1000)

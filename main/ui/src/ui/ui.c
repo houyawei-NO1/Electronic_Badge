@@ -24,7 +24,9 @@ void loadScreen(enum ScreensEnum screenId) {
 
 void ui_init() {
     create_screens();
-    loadScreen(SCREEN_ID_BADGE_MAIN);
+    /* Load main screen directly (no animation) for instant visibility */
+    currentScreen = SCREEN_ID_BADGE_MAIN - 1;
+    lv_scr_load(objects.badge_main);
 }
 
 void ui_tick() {

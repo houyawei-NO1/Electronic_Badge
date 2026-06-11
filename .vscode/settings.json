@@ -13,7 +13,7 @@
     "--compile-commands-dir=e:\\HouYawei\\01.ESP32Project\\Electronic Badge\\build"
   ],
   "idf.flashType": "UART",
-  "idf.portWin": "COM6",
+  "idf.portWin": "COM9",
   "idf.openOcdConfigs": [
     "board/esp32c3-builtin.cfg"
   ]

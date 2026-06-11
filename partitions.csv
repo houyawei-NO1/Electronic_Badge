@@ -1,5 +1,6 @@
 # Name,   Type, SubType,  Offset,  Size,    Flags
 # Note: if you change the partition table, you must also update sdkconfig
 #       CONFIG_PARTITION_TABLE_CUSTOM_FILENAME and flash the new partitions.
-nvs,      data, nvs,     0x9000,  0x4000,
-app0,     app,  ota_0,   0x10000, 0x3E0000,
+nvs,      data, nvs,     0x9000,  0x6000,
+app0,     app,  ota_0,   0x10000, 0x370000,
+spiffs,   data, spiffs,  0x380000, 0x80000,
