@@ -30,4 +30,18 @@ typedef struct {
  */
 bool weather_fetch(weather_data_t* data);
 
+/**
+ * @brief Save weather data to NVS (non-volatile storage)
+ * @param data Pointer to weather data to save
+ * @return true if successful
+ */
+bool weather_save_to_nvs(const weather_data_t* data);
+
+/**
+ * @brief Load weather data from NVS
+ * @param data Pointer to weather data structure to fill
+ * @return true if valid data was loaded
+ */
+bool weather_load_from_nvs(weather_data_t* data);
+
 #endif // WEATHER_H

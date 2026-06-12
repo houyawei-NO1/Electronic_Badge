@@ -23,9 +23,36 @@
 #include "esp_sleep.h"
 
 /**
- * @brief Initialize power management
+ * @brief Initialize power management (GPIO only, no auto light sleep)
+ *
+ * This only configures button GPIO pins. Auto light sleep (tickless idle)
+ * is NOT enabled here — call power_enable_light_sleep() before the first
+ * esp_light_sleep_start(). This keeps UART logs and CPU at full speed
+ * during normal display / update phases.
  */
 void power_init(void);
+
+/**
+ * @brief Enable automatic tickless idle light sleep.
+ *
+ * Call this once before entering the low-power screensaver loop.
+ * After this call, FreeRTOS idle task will automatically enter light sleep
+ * whenever the system is idle — which saves power and is the desired
+ * behavior during the screensaver (big-clock) phase.
+ *
+ * Must NOT be called during normal (display / update) modes because
+ * it causes UART log output to stall and reduces responsiveness.
+ */
+void power_enable_light_sleep(void);
+
+/**
+ * @brief Disable automatic tickless idle light sleep.
+ *
+ * Call this when waking up from low-power mode and resuming normal
+ * display/update operations. Restores CPU to full speed so UART logs
+ * emit normally and UI updates feel responsive.
+ */
+void power_disable_light_sleep(void);
 
 /**
  * @brief Enter low-power mode (light sleep).

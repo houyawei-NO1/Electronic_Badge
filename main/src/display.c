@@ -340,11 +340,18 @@ esp_err_t display_init(void)
     ui_init();
     lvgl_port_unlock();
 
-    /* --- 8. Force label colors / fonts to white / simsun_16_cjk --- */
+    /* --- 8. Force label colors / fonts to white / simsun_16_cjk.
+     * 注意: ui_init() 不再调用 lv_scr_load(badge_main), 因此
+     * lv_disp_get_scr_act() 此时返回 NULL, 直接操作已创建的
+     * objects.badge_main 对象即可. 真实屏幕的首次加载发生在
+     * display_main_screen() 写入真实时间/天气数据之后, 这样
+     * 可以彻底避免上电瞬间出现 PicoPixel 原始占位值. --- */
     lvgl_port_lock(0);
-    lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
-    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
+    lv_obj_t *main_scr = objects.badge_main;
+    if (main_scr) {
+        lv_obj_set_style_bg_color(main_scr, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(main_scr, LV_OPA_COVER, 0);
+    }
 
     /* All labels → white text, opaque (never let theme pick gray/black) */
     lv_obj_t *label_list[] = {
@@ -384,14 +391,13 @@ esp_err_t display_init(void)
         lv_obj_set_style_text_font(objects.label_detail, &lv_font_montserrat_14, 0);
     lvgl_port_unlock();
 
-    /* Force immediate screen refresh to ensure content is visible
-     * before returning (prevents black screen on first boot) */
-    lvgl_port_lock(0);
-    lv_refr_now(lv_disp_get_default());
-    lvgl_port_unlock();
+    /* 不再在这里强制 lv_refr_now():
+     *  - display_init() 阶段屏幕未被 lv_scr_load() 加载, 刷新无意义
+     *  - display_main_screen() 写入真实数据后会触发首次 lv_scr_load,
+     *    LVGL 会在下次 lv_task_handler 中自动刷新, 上电不会再闪默认值 */
 
     is_initialized = true;
-    ESP_LOGI(TAG, "显示初始化成功");
+    ESP_LOGI(TAG, "显示初始化成功 (延迟加载屏幕, 待真实时间/天气写入)");
     return ESP_OK;
 }
 

@@ -534,7 +534,7 @@ CONFIG_SPI_CLOCK_MHZ=20
 #
 # Debug Configuration
 #
-# CONFIG_DEBUG_MODE is not set
+CONFIG_DEBUG_MODE=y
 CONFIG_DEBUG_LOG_LEVEL=3
 # end of Debug Configuration
 # end of Electronic Badge Configuration

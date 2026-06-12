@@ -49,7 +49,9 @@ void create_screen_badge_main() {
                     lv_obj_set_pos(obj, 0, 51);
                     lv_obj_set_size(obj, 240, LV_SIZE_CONTENT);
                     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_label_set_text(obj, "2025-01-15");
+                    // 保持空文本, 真实日期由 display_main_screen() 填充
+                    // 避免上电瞬间显示 PicoPixel 原始占位值 "2025-01-15"
+                    lv_label_set_text(obj, "");
                 }
                 {
                     // label_update
@@ -58,7 +60,8 @@ void create_screen_badge_main() {
                     lv_obj_set_pos(obj, 0, 184);
                     lv_obj_set_size(obj, 240, LV_SIZE_CONTENT);
                     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_label_set_text(obj, "Updated");
+                    // 保持空文本, 真实更新时间由 display_main_screen() 填充
+                    lv_label_set_text(obj, "");
                 }
                 {
                     // label_detail
@@ -66,7 +69,8 @@ void create_screen_badge_main() {
                     objects.label_detail = obj;
                     lv_obj_set_pos(obj, 58, 160);
                     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-                    lv_label_set_text(obj, "Hum:60% Wind:3");
+                    // 保持空文本, 真实湿度/风速由 display_main_screen() 填充
+                    lv_label_set_text(obj, "");
                 }
                 {
                     // label_time
@@ -79,7 +83,9 @@ void create_screen_badge_main() {
                     lv_obj_set_style_transform_pivot_x(obj, 120, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_transform_pivot_y(obj, 8, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_transform_angle(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_label_set_text(obj, "9:00");
+                    // 保持空文本, 真实时间由 display_main_screen() 填充
+                    // 避免上电瞬间显示 PicoPixel 原始占位值 "9:00"
+                    lv_label_set_text(obj, "");
                 }
                 {
                     // label_temp — 右半边水平居中 (x=120~240)
@@ -88,7 +94,8 @@ void create_screen_badge_main() {
                     lv_obj_set_pos(obj, 120, 136);
                     lv_obj_set_size(obj, 120, LV_SIZE_CONTENT);
                     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_label_set_text(obj, "25度");
+                    // 保持空文本, 真实温度由 display_main_screen() 填充
+                    lv_label_set_text(obj, "");
                 }
                 {
                     // label_weather — 左半边水平居中 (x=0~120)
@@ -97,7 +104,8 @@ void create_screen_badge_main() {
                     lv_obj_set_pos(obj, 0, 134);
                     lv_obj_set_size(obj, 120, LV_SIZE_CONTENT);
                     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_label_set_text(obj, "Sunny");
+                    // 保持空文本, 真实天气描述由 display_main_screen() 填充
+                    lv_label_set_text(obj, "");
                 }
             }
         }

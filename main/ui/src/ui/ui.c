@@ -23,10 +23,12 @@ void loadScreen(enum ScreensEnum screenId) {
 }
 
 void ui_init() {
+    // 只创建 LVGL 屏幕对象, 不立即加载到显示设备.
+    // 所有 label 默认文本都是空字符串 (见 screens.c create_screen_badge_main).
+    // 由 display_main_screen() 先写入真实时间/天气数据, 再第一次调用 loadScreen()
+    // 把屏幕推到显示 — 这样上电就不会出现 PicoPixel 原始占位值 (9:00 / 2025-01-15).
     create_screens();
-    /* Load main screen directly (no animation) for instant visibility */
-    currentScreen = SCREEN_ID_BADGE_MAIN - 1;
-    lv_scr_load(objects.badge_main);
+    currentScreen = -1;
 }
 
 void ui_tick() {

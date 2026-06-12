@@ -10,6 +10,8 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_crt_bundle.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "miniz.h"
 
 static const char* TAG = "天气";
@@ -347,5 +349,74 @@ if (resp_info->is_gzip) {
              data->humidity, data->wind_dir, data->wind_scale,
              data->pressure, data->visibility);
 
+    return true;
+}
+
+/* =========================================================================
+ * NVS persistence for weather data
+ * ========================================================================= */
+#define WEATHER_NVS_NAMESPACE  "weather"
+#define WEATHER_NVS_KEY        "last_data"
+
+bool weather_save_to_nvs(const weather_data_t* data)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(WEATHER_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS打开失败: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    err = nvs_set_blob(nvs_handle, WEATHER_NVS_KEY, data, sizeof(weather_data_t));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS写入天气数据失败: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        return false;
+    }
+
+    err = nvs_commit(nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS提交失败: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        return false;
+    }
+
+    nvs_close(nvs_handle);
+    ESP_LOGI(TAG, "天气数据已保存到NVS");
+    return true;
+}
+
+bool weather_load_from_nvs(weather_data_t* data)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(WEATHER_NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "NVS无天气数据 (namespace不存在)");
+        return false;
+    }
+
+    size_t size = sizeof(weather_data_t);
+    err = nvs_get_blob(nvs_handle, WEATHER_NVS_KEY, data, &size);
+    nvs_close(nvs_handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "NVS读取天气数据失败: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    if (size != sizeof(weather_data_t)) {
+        ESP_LOGW(TAG, "NVS天气数据大小不匹配: %d vs %d", size, sizeof(weather_data_t));
+        return false;
+    }
+
+    /* Validate: update_time must be reasonable (> 2020-01-01) */
+    if (data->update_time < 1577836800UL) {
+        ESP_LOGW(TAG, "NVS天气数据时间戳无效");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "从NVS加载天气数据: %s %d°C (更新于%lds前)",
+             data->weather_text, data->temperature,
+             (long)(time(NULL) - (time_t)data->update_time));
     return true;
 }

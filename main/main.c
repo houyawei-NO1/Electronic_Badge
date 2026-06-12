@@ -225,6 +225,10 @@ static void enter_low_power_mode(void)
 {
     ESP_LOGI(TAG, "=== 低功耗模式 ===");
 
+    // ✅ 在这里才启用自动 tickless light sleep
+    // 之前一直保持 CPU 全速，保证 UART 日志正常输出
+    power_enable_light_sleep();
+
     // Show screensaver with current time
     time_t now;
     time(&now);
@@ -242,9 +246,14 @@ static void enter_low_power_mode(void)
         bool timer_wakeup = power_enter_low_power_mode(LIGHT_SLEEP_INTERVAL_US);
 
         if (!timer_wakeup) {
-            // GPIO wakeup (button pressed) -> enter active display mode
+            // GPIO wakeup (button pressed) -> return to caller to re-enter display mode
             ESP_LOGI(TAG, "按键唤醒，进入显示模式");
-            return;  // Caller will enter display mode
+            // ✅ 禁用自动 light sleep，恢复 CPU 全速
+            //    否则唤醒后所有 vTaskDelay 仍会进入自动 light sleep，导致日志停摆
+            power_disable_light_sleep();
+            // 给系统一点时间从 light sleep 恢复到全速，确保后续日志正常输出
+            vTaskDelay(pdMS_TO_TICKS(50));
+            return;
         }
 
         // Timer wakeup -> refresh screensaver time
@@ -325,6 +334,9 @@ static bool enter_update_mode(void)
 
         s_has_weather = true;
         s_last_weather_update = s_weather_data.update_time;
+
+        // Save to NVS so data persists across reboots/wakeups
+        weather_save_to_nvs(&s_weather_data);
 
         // Refresh screen with new data
         time_t now;
@@ -448,7 +460,7 @@ void app_main(void)
     // Initialize WiFi manager
     wifi_manager_init();
 
-    // Initialize power management
+    // Initialize power management (GPIO only, no auto light sleep)
     power_init();
 
     // Initialize display
@@ -457,6 +469,15 @@ void app_main(void)
         esp_restart();
     }
     display_backlight_on();
+
+    // Load cached weather data from NVS (persists across reboots/wakeups)
+    if (weather_load_from_nvs(&s_weather_data)) {
+        s_has_weather = true;
+        s_last_weather_update = s_weather_data.update_time;
+        ESP_LOGI(TAG, "从NVS加载天气数据成功");
+    } else {
+        ESP_LOGI(TAG, "NVS无缓存天气数据，首次启动需联网获取");
+    }
 
     // Get wakeup cause
     esp_sleep_wakeup_cause_t wakeup_cause = power_get_wakeup_cause();
@@ -474,38 +495,52 @@ void app_main(void)
     if (nvs_count == 0 && !has_sdkconfig_wifi) {
         ESP_LOGI(TAG, "未找到WiFi配置，进入配网模式");
         enter_config_mode();
-        // After config, enter low power mode
-        enter_low_power_mode();
-        return;
+        // After config, fall through into the main loop below
     }
 
-    // Normal boot flow
-    s_boot_count++;
-    ESP_LOGI(TAG, "启动次数: %lu", s_boot_count);
+    // =========================================================================
+    // 主循环 (永远循环)
+    // 每次低功耗按键唤醒后，回到这里重新判断是否需要更新天气
+    // 数据新鲜 → 直接显示主界面（不再显示WiFi连接界面）
+    // 数据过期 → 连接WiFi更新天气
+    // =========================================================================
+    while (1) {
+        time_t now = time(NULL);
+        s_boot_count++;
 
-    // Check if first boot or weather data stale
-    time_t now = time(NULL);
-    bool data_stale = s_has_weather &&
-                      (now - (time_t)s_last_weather_update) > 3600;
+        // 天气数据是否需要更新：
+        //   - 没有天气数据 → 需要
+        //   - 距离上次更新超过 1 小时 → 需要
+        bool need_update = !s_has_weather ||
+                           ((now - (time_t)s_last_weather_update) > 3600);
 
-    if (s_boot_count == 1 || data_stale || !s_has_weather) {
-        ESP_LOGI(TAG, "需要更新天气 (首次启动或数据过期)");
-        if (enter_update_mode()) {
-            enter_display_mode();
+        ESP_LOGI(TAG, "--- 主循环 #%lu ---", s_boot_count);
+        ESP_LOGI(TAG, "是否有天气: %s, 上次更新: %lds前, 需要更新: %s",
+                 s_has_weather ? "yes" : "no",
+                 s_has_weather ? (long)(now - (time_t)s_last_weather_update) : -1,
+                 need_update ? "yes" : "no");
+
+        if (need_update) {
+            ESP_LOGI(TAG, "天气数据过期或缺失，进入更新模式");
+            if (enter_update_mode()) {
+                ESP_LOGI(TAG, "天气更新成功，进入显示模式");
+            } else {
+                ESP_LOGW(TAG, "天气更新失败，使用缓存数据进入显示模式");
+            }
         } else {
-            // Update failed, still show display with cached/default data
-            enter_display_mode();
+            ESP_LOGI(TAG, "天气数据新鲜，直接进入显示模式");
         }
-    } else {
-        ESP_LOGI(TAG, "天气数据新鲜，进入显示模式");
+
+        // 显示主界面（时间 + 天气 + 温度）
+        // 超时或WAKE长按后 return
         enter_display_mode();
+
+        // 进入低功耗屏保模式（大时间显示 + light sleep）
+        // 按键唤醒后 return，回到循环顶部
+        ESP_LOGI(TAG, "进入低功耗模式");
+        enter_low_power_mode();
+
+        // 唤醒后继续循环 → 重新判断是否需要更新天气
+        // 不会走到 esp_restart()，也不会重启
     }
-
-    // After display mode timeout or button press, enter low power mode
-    ESP_LOGI(TAG, "进入低功耗模式");
-    enter_low_power_mode();
-
-    // Should never reach here (low power mode loops forever)
-    ESP_LOGW(TAG, "低功耗模式异常退出，重启");
-    esp_restart();
 }

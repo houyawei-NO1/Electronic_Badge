@@ -45,8 +45,31 @@ void power_init(void)
      * No need to pull-down RST/backlight because light sleep
      * preserves GPIO output levels. */
 
-    /* Configure power management for light sleep.
-     * ESP32-C3 requires this before esp_light_sleep_start() works. */
+    /* NOTE: esp_pm_configure(.light_sleep_enable = true) is NOT called
+     * here. It is deferred to power_enable_light_sleep() which is called
+     * from enter_low_power_mode() — the screensaver loop.
+     *
+     * Why? Calling it here would enable tickless idle light sleep globally,
+     * which means every vTaskDelay() in display_init() / enter_display_mode()
+     * / enter_update_mode() would cause the system to enter light sleep,
+     * stalling UART log output and making the boot sequence appear to hang.
+     * We only want automatic light sleep during the low-power screensaver
+     * phase, not during normal display/update phases. */
+    ESP_LOGI(TAG, "电源管理初始化完成 (按键GPIO已配置, 自动light sleep已推迟)");
+}
+
+void power_enable_light_sleep(void)
+{
+    /* Enable tickless idle light sleep.
+     * ESP32-C3 requires this before esp_light_sleep_start() works,
+     * and it also enables automatic light sleep during FreeRTOS idle
+     * periods — which is exactly what we want during the low-power
+     * screensaver loop.
+     *
+     * After this call:
+     *   - idle task will automatically enter light sleep (saves power)
+     *   - UART log output will stall during sleep (acceptable in screensaver)
+     *   - esp_light_sleep_start() will work for explicit long-duration sleep */
     esp_pm_config_t pm_config = {
         .max_freq_mhz = 160,
         .min_freq_mhz = 40,
@@ -56,7 +79,28 @@ void power_init(void)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "电源管理配置失败: %d", ret);
     } else {
-        ESP_LOGI(TAG, "电源管理已配置 (light sleep enabled)");
+        ESP_LOGI(TAG, "自动light sleep已启用 (tickless idle)");
+    }
+}
+
+void power_disable_light_sleep(void)
+{
+    /* Disable automatic tickless idle light sleep — restore full CPU speed.
+     *
+     * After this call:
+     *   - idle task will NOT enter light sleep (CPU stays at max frequency)
+     *   - UART logs emit normally (no stalls during vTaskDelay)
+     *   - esp_light_sleep_start() will still work if re-enabled later */
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 160,
+        .light_sleep_enable = false,
+    };
+    esp_err_t ret = esp_pm_configure(&pm_config);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "禁用light sleep失败: %d", ret);
+    } else {
+        ESP_LOGI(TAG, "自动light sleep已禁用 (CPU全速)");
     }
 }
 
