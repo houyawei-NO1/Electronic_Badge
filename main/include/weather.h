@@ -12,39 +12,33 @@
 #define HOURLY_MAX    24
 #define DAILY_MAX     10
 
-// Weather data structure (current conditions)
+// Freshness thresholds (seconds)
+#define HOURLY_FRESH_SECS  3600    // 1 hour
+#define DAILY_FRESH_SECS   43200   // 12 hours
+
+// Weather data structure (current conditions) — only fields used by UI
 typedef struct {
     int16_t weather_code;      // Weather condition code
     int8_t temperature;        // Temperature in Celsius
-    int8_t feels_like;         // Feels like temperature
     uint8_t humidity;          // Humidity percentage
-    uint8_t wind_speed;        // Wind speed (km/h)
     uint8_t wind_scale;        // Wind scale (Beaufort, 0-12)
-    uint16_t pressure;         // Atmospheric pressure (hPa)
-    uint8_t visibility;        // Visibility (km)
     char weather_text[32];     // Weather description
-    char wind_dir[16];         // Wind direction
     uint32_t update_time;      // Last update timestamp
 } weather_data_t;
 
-// Single hourly forecast item
+// Single hourly forecast item — only fields used by UI
 typedef struct {
-    char fx_time[24];          // Forecast time "YYYY-MM-DDTHH:MM+08:00"
+    char fx_time[6];           // "HH:MM"
     int16_t icon;              // Weather icon code
     int8_t temp;               // Temperature
-    char text[16];             // Weather description
-    uint8_t pop;               // Precipitation probability (%)
 } hourly_item_t;
 
-// Single daily forecast item
+// Single daily forecast item — only fields used by UI
 typedef struct {
-    char fx_date[16];          // Forecast date "YYYY-MM-DD"
+    char fx_date[6];           // "MM/DD"
     int16_t icon_day;          // Daytime icon code
-    int16_t icon_night;        // Nighttime icon code
     int8_t temp_max;           // Max temperature
     int8_t temp_min;           // Min temperature
-    char text_day[16];         // Daytime weather description
-    char text_night[16];       // Nighttime weather description
 } daily_item_t;
 
 // Hourly forecast result
@@ -93,5 +87,33 @@ bool weather_save_to_nvs(const weather_data_t* data);
  * @return true if valid data was loaded
  */
 bool weather_load_from_nvs(weather_data_t* data);
+
+/**
+ * @brief Save hourly forecast to NVS
+ * @param data Pointer to hourly forecast to save
+ * @return true if successful
+ */
+bool weather_save_hourly_to_nvs(const hourly_forecast_t* data);
+
+/**
+ * @brief Load hourly forecast from NVS
+ * @param data Pointer to hourly forecast to fill
+ * @return true if valid data was loaded
+ */
+bool weather_load_hourly_from_nvs(hourly_forecast_t* data);
+
+/**
+ * @brief Save daily forecast to NVS
+ * @param data Pointer to daily forecast to save
+ * @return true if successful
+ */
+bool weather_save_daily_to_nvs(const daily_forecast_t* data);
+
+/**
+ * @brief Load daily forecast from NVS
+ * @param data Pointer to daily forecast to fill
+ * @return true if valid data was loaded
+ */
+bool weather_load_daily_from_nvs(daily_forecast_t* data);
 
 #endif // WEATHER_H

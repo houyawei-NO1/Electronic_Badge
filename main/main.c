@@ -50,7 +50,10 @@ static uint32_t s_boot_count = 0;
 // Forecast data (fetched alongside current weather)
 static hourly_forecast_t s_hourly_forecast = {0};
 static daily_forecast_t s_daily_forecast = {0};
-static bool s_has_forecast = false;
+static bool s_has_hourly = false;
+static bool s_has_daily = false;
+static uint32_t s_last_hourly_update = 0;  // epoch seconds
+static uint32_t s_last_daily_update = 0;
 
 // Screen navigation index for short-press WAKE cycling
 // 0 = main, 1 = hourly, 2 = daily
@@ -294,7 +297,7 @@ static void enter_display_mode(void)
                     ESP_LOGI(TAG, "切换到主界面");
                 } else if (s_screen_page == 1) {
                     // Hourly forecast
-                    if (s_has_forecast) {
+                    if (s_has_hourly) {
                         loadScreen(SCREEN_ID_BADGE_HOURLY);
                         display_hourly_forecast(&s_hourly_forecast);
                     } else {
@@ -304,7 +307,7 @@ static void enter_display_mode(void)
                     ESP_LOGI(TAG, "切换到小时预报界面");
                 } else if (s_screen_page == 2) {
                     // Daily forecast
-                    if (s_has_forecast) {
+                    if (s_has_daily) {
                         loadScreen(SCREEN_ID_BADGE_DAILY);
                         display_daily_forecast(&s_daily_forecast);
                     } else {
@@ -336,10 +339,17 @@ static void enter_display_mode(void)
                         s_weather_data.wind_scale, update_str);
                     ESP_LOGI(TAG, "天气更新成功");
                     // Also fetch forecast data
-                    weather_fetch_hourly(&s_hourly_forecast);
-                    weather_fetch_daily(&s_daily_forecast);
-                    if (s_hourly_forecast.count > 0 || s_daily_forecast.count > 0)
-                        s_has_forecast = true;
+                    time_t fetch_now = time(NULL);
+                    if (weather_fetch_hourly(&s_hourly_forecast)) {
+                        s_has_hourly = true;
+                        s_last_hourly_update = (uint32_t)fetch_now;
+                        weather_save_hourly_to_nvs(&s_hourly_forecast);
+                    }
+                    if (weather_fetch_daily(&s_daily_forecast)) {
+                        s_has_daily = true;
+                        s_last_daily_update = (uint32_t)fetch_now;
+                        weather_save_daily_to_nvs(&s_daily_forecast);
+                    }
                 } else {
                     ESP_LOGW(TAG, "天气获取失败");
                 }
@@ -502,11 +512,16 @@ static bool enter_update_mode(void)
                  s_weather_data.weather_code, s_weather_data.temperature);
 
         // Fetch hourly and daily forecast data (best-effort, WiFi still up)
+        time_t fetch_now = time(NULL);
         if (weather_fetch_hourly(&s_hourly_forecast)) {
-            s_has_forecast = true;
+            s_has_hourly = true;
+            s_last_hourly_update = (uint32_t)fetch_now;
+            weather_save_hourly_to_nvs(&s_hourly_forecast);
         }
         if (weather_fetch_daily(&s_daily_forecast)) {
-            s_has_forecast = true;
+            s_has_daily = true;
+            s_last_daily_update = (uint32_t)fetch_now;
+            weather_save_daily_to_nvs(&s_daily_forecast);
         }
 
         return true;
@@ -647,6 +662,19 @@ void app_main(void)
         ESP_LOGI(TAG, "NVS无缓存天气数据，首次启动需联网获取");
     }
 
+    // Load cached forecast data from NVS
+    if (weather_load_hourly_from_nvs(&s_hourly_forecast)) {
+        s_has_hourly = true;
+        // Use current weather update_time as approximate hourly timestamp
+        s_last_hourly_update = s_has_weather ? s_weather_data.update_time : time(NULL);
+        ESP_LOGI(TAG, "从NVS加载小时预报: %d 小时", s_hourly_forecast.count);
+    }
+    if (weather_load_daily_from_nvs(&s_daily_forecast)) {
+        s_has_daily = true;
+        s_last_daily_update = s_has_weather ? s_weather_data.update_time : time(NULL);
+        ESP_LOGI(TAG, "从NVS加载每日预报: %d 天", s_daily_forecast.count);
+    }
+
     // Get wakeup cause
     esp_sleep_wakeup_cause_t wakeup_cause = power_get_wakeup_cause();
     ESP_LOGI(TAG, "唤醒原因: %d", wakeup_cause);
@@ -676,16 +704,25 @@ void app_main(void)
         time_t now = time(NULL);
         s_boot_count++;
 
-        // 天气数据是否需要更新：
-        //   - 没有天气数据 → 需要
-        //   - 距离上次更新超过 1 小时 → 需要
-        bool need_update = !s_has_weather ||
+        // 天气和预报数据是否需要更新：
+        //   各数据按各自的保鲜期判断
+        //   任意一项过期 → 连WiFi一次性全部刷新
+        bool need_current = !s_has_weather ||
                            ((now - (time_t)s_last_weather_update) > 3600);
+        bool need_hourly  = !s_has_hourly ||
+                           ((now - (time_t)s_last_hourly_update) > HOURLY_FRESH_SECS);
+        bool need_daily   = !s_has_daily ||
+                           ((now - (time_t)s_last_daily_update)  > DAILY_FRESH_SECS);
+        bool need_update  = need_current || need_hourly || need_daily;
 
         ESP_LOGI(TAG, "--- 主循环 #%lu ---", s_boot_count);
-        ESP_LOGI(TAG, "是否有天气: %s, 上次更新: %lds前, 需要更新: %s",
-                 s_has_weather ? "yes" : "no",
+        ESP_LOGI(TAG, "新鲜度: 当前%s(%lds前) 小时%s(%lds前) 每日%s(%lds前) 需更新=%s",
+                 s_has_weather ? "OK" : "无",
                  s_has_weather ? (long)(now - (time_t)s_last_weather_update) : -1,
+                 s_has_hourly ? "OK" : "无",
+                 s_has_hourly ? (long)(now - (time_t)s_last_hourly_update) : -1,
+                 s_has_daily ? "OK" : "无",
+                 s_has_daily ? (long)(now - (time_t)s_last_daily_update) : -1,
                  need_update ? "yes" : "no");
 
         if (need_update) {

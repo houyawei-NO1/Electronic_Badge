@@ -148,6 +148,24 @@ static esp_err_t http_event_handler(esp_http_client_event_t* evt)
     return ESP_OK;
 }
 
+// Helper: find the matching } for a {, handling nested braces.
+// Returns pointer to the matching }, or NULL if not found.
+static const char* find_matching_brace(const char* start, const char* end_limit)
+{
+    if (!start || *start != '{') return NULL;
+    int depth = 1;
+    const char *p = start + 1;
+    while (*p && p < end_limit) {
+        if (*p == '{') depth++;
+        else if (*p == '}') {
+            depth--;
+            if (depth == 0) return p;
+        }
+        p++;
+    }
+    return NULL;
+}
+
 // Static buffers to avoid stack overflow
 static http_response_t s_resp_info;
 static char s_response[8192];  // Must be large enough for the biggest JSON (~4400 bytes for 24h hourly)
@@ -255,41 +273,21 @@ if (resp_info->is_gzip) {
         return false;
     }
 
-    // Extract data from now object
+    // Extract data from now object (only fields used by UI)
     if (json_get_string(now_start, "temp", value_buf, sizeof(value_buf))) {
         data->temperature = atoi(value_buf);
-    }
-
-    if (json_get_string(now_start, "feelsLike", value_buf, sizeof(value_buf))) {
-        data->feels_like = atoi(value_buf);
     }
 
     if (json_get_string(now_start, "humidity", value_buf, sizeof(value_buf))) {
         data->humidity = atoi(value_buf);
     }
 
-    if (json_get_string(now_start, "windSpeed", value_buf, sizeof(value_buf))) {
-        data->wind_speed = atoi(value_buf);
-    }
-
     if (json_get_string(now_start, "windScale", value_buf, sizeof(value_buf))) {
         data->wind_scale = atoi(value_buf);
     }
 
-    if (json_get_string(now_start, "pressure", value_buf, sizeof(value_buf))) {
-        data->pressure = atoi(value_buf);
-    }
-
-    if (json_get_string(now_start, "vis", value_buf, sizeof(value_buf))) {
-        data->visibility = atoi(value_buf);
-    }
-
     if (json_get_string(now_start, "text", value_buf, sizeof(value_buf))) {
         strncpy(data->weather_text, value_buf, sizeof(data->weather_text) - 1);
-    }
-
-    if (json_get_string(now_start, "windDir", value_buf, sizeof(value_buf))) {
-        strncpy(data->wind_dir, value_buf, sizeof(data->wind_dir) - 1);
     }
 
     if (json_get_string(now_start, "icon", value_buf, sizeof(value_buf))) {
@@ -352,10 +350,9 @@ if (resp_info->is_gzip) {
         data->update_time = (uint32_t)now_time;
     }
 
-    ESP_LOGI(TAG, "天气: %s, %d°C, 体感%d°C, 湿度%d%%, 风%s %d级, 气压%dhPa, 能见度%dkm",
-             data->weather_text, data->temperature, data->feels_like,
-             data->humidity, data->wind_dir, data->wind_scale,
-             data->pressure, data->visibility);
+    ESP_LOGI(TAG, "天气: %s, %d°C, 湿度%d%%, 风力%d级",
+             data->weather_text, data->temperature,
+             data->humidity, data->wind_scale);
 
     return true;
 }
@@ -423,53 +420,43 @@ bool weather_fetch_hourly(hourly_forecast_t* forecast)
     const char *arr = strstr(s_response, "\"hourly\"");
     if (!arr) { ESP_LOGE(TAG, "小时预报: 没有hourly数组"); return false; }
 
-    // Parse hourly items by scanning for each "{"
-    // Each object in the array: {"fxTime":"...","temp":"...","icon":"...","text":"...",...}
+    // Parse hourly items using brace-counting.
+    const char *end_limit = s_response + strlen(s_response);
     int count = 0;
-    const char *p = arr;
-    while (count < HOURLY_MAX) {
-        // Find the next "fxTime" key (start of next object in the array)
-        p = strstr(p, "\"fxTime\"");
-        if (!p) break;
+    const char *p = strstr(arr, "{\"fxTime\"");
+    if (!p) { ESP_LOGE(TAG, "小时预报: 找不到{fxTime"); return false; }
 
-        // Rewind to find the opening { of this object
-        // The key is inside an object: ...},{"fxTime":"..."...}, so going backward
-        // from "fxTime" we should hit the { of this object
-        const char *obj_start = p;
-        // Count braces: go forward to find the }, then search from there
-        // Actually simpler: just search back from p for '{' within reasonable distance
-        while (obj_start > s_response && *obj_start != '{') obj_start--;
-        if (*obj_start != '{') { p += 1; continue; }
-
+    while (count < HOURLY_MAX && p) {
         hourly_item_t *item = &forecast->hours[count];
 
-        if (json_get_string(obj_start, "fxTime", item->fx_time, sizeof(item->fx_time))) {
-            // Parse hour text "HH:MM" from fxTime "YYYY-MM-DDTHH:MM+08:00"
-            char *t = strchr(item->fx_time, 'T');
+        char iso_time[32];
+        if (json_get_string(p, "fxTime", iso_time, sizeof(iso_time))) {
+            char *t = strchr(iso_time, 'T');
             if (t) {
-                memmove(item->fx_time, t + 1, 5);  // keep "HH:MM"
+                strncpy(item->fx_time, t + 1, 5);
+                item->fx_time[5] = '\0';
+            } else {
+                strncpy(item->fx_time, iso_time, 5);
                 item->fx_time[5] = '\0';
             }
         }
-        if (json_get_string(obj_start, "temp", vb, sizeof(vb))) item->temp = atoi(vb);
-        if (json_get_string(obj_start, "icon", vb, sizeof(vb))) item->icon = atoi(vb);
-        if (json_get_string(obj_start, "text", item->text, sizeof(item->text))) {}
-        if (json_get_string(obj_start, "pop", vb, sizeof(vb))) item->pop = atoi(vb);
+        if (json_get_string(p, "temp", vb, sizeof(vb))) item->temp = atoi(vb);
+        if (json_get_string(p, "icon", vb, sizeof(vb))) item->icon = atoi(vb);
 
         count++;
 
-        // Advance past the ENTIRE current {object} to find the next one
-        const char *obj_end = strchr(obj_start + 1, '}');
-        if (!obj_end) break;
-        p = obj_end + 1;
+        // Find matching } via brace counting
+        const char *obj_end = find_matching_brace(p, end_limit);
+        if (!obj_end) { ESP_LOGI(TAG, "小时: 第%d项后无匹配}}", count); break; }
+        p = strstr(obj_end + 1, "{\"fxTime\"");
     }
     forecast->count = count;
 
     ESP_LOGI(TAG, "小时预报: 获取了 %d 个小时数据", count);
     for (int i = 0; i < count && i < 10; i++) {
-        ESP_LOGI(TAG, "  [%d] %s %d°C icon=%d %s", i,
+        ESP_LOGI(TAG, "  [%d] %s %d°C icon=%d", i,
                  forecast->hours[i].fx_time, forecast->hours[i].temp,
-                 forecast->hours[i].icon, forecast->hours[i].text);
+                 forecast->hours[i].icon);
     }
     return count > 0;
 }
@@ -527,6 +514,8 @@ bool weather_fetch_daily(daily_forecast_t* forecast)
         s_response[s_resp_info.raw_len] = '\0';
     }
 
+    ESP_LOGI(TAG, "每日预报响应长度 %zu, 前400: %.400s", strlen(s_response), s_response);
+
     char vb[64];
     if (!json_get_string(s_response, "code", vb, sizeof(vb)) || strcmp(vb, "200") != 0)
         { ESP_LOGE(TAG, "每日预报: API错误 code=%s", vb); return false; }
@@ -534,41 +523,51 @@ bool weather_fetch_daily(daily_forecast_t* forecast)
     const char *arr = strstr(s_response, "\"daily\"");
     if (!arr) { ESP_LOGE(TAG, "每日预报: 没有daily数组"); return false; }
 
-    // Parse daily items — same approach as hourly above
+    // Parse daily items using brace-counting to find object boundaries.
+    const char *end_limit = s_response + strlen(s_response);
     int count = 0;
-    const char *p = arr;
-    while (count < DAILY_MAX) {
-        p = strstr(p, "\"fxDate\"");
-        if (!p) break;
+    const char *p = strstr(arr, "{\"fxDate\"");
+    if (!p) { ESP_LOGE(TAG, "每日预报: 找不到{fxDate"); return false; }
 
-        const char *obj_start = p;
-        while (obj_start > s_response && *obj_start != '{') obj_start--;
-        if (*obj_start != '{') { p += 1; continue; }
-
+    while (count < DAILY_MAX && p) {
         daily_item_t *item = &forecast->days[count];
-        if (json_get_string(obj_start, "fxDate", item->fx_date, sizeof(item->fx_date))) {}
-        if (json_get_string(obj_start, "tempMax", vb, sizeof(vb))) item->temp_max = atoi(vb);
-        if (json_get_string(obj_start, "tempMin", vb, sizeof(vb))) item->temp_min = atoi(vb);
-        if (json_get_string(obj_start, "iconDay", vb, sizeof(vb))) item->icon_day = atoi(vb);
-        if (json_get_string(obj_start, "iconNight", vb, sizeof(vb))) item->icon_night = atoi(vb);
-        if (json_get_string(obj_start, "textDay", item->text_day, sizeof(item->text_day))) {}
-        if (json_get_string(obj_start, "textNight", item->text_night, sizeof(item->text_night))) {}
+
+        char iso_date[16];
+        if (json_get_string(p, "fxDate", iso_date, sizeof(iso_date))) {
+            char *d1 = strchr(iso_date, '-');
+            if (d1) {
+                d1++;
+                char *d2 = strchr(d1, '-');
+                if (d2)
+                    snprintf(item->fx_date, 6, "%.2s/%.2s", d1, d2 + 1);
+                else {
+                    strncpy(item->fx_date, d1, 5);
+                    item->fx_date[5] = '\0';
+                }
+            } else {
+                strncpy(item->fx_date, iso_date, 5);
+                item->fx_date[5] = '\0';
+            }
+        }
+        if (json_get_string(p, "tempMax", vb, sizeof(vb))) item->temp_max = atoi(vb);
+        if (json_get_string(p, "tempMin", vb, sizeof(vb))) item->temp_min = atoi(vb);
+        if (json_get_string(p, "iconDay", vb, sizeof(vb))) item->icon_day = atoi(vb);
+
         count++;
 
-        // Advance past the entire {object}
-        const char *obj_end = strchr(obj_start + 1, '}');
-        if (!obj_end) break;
-        p = obj_end + 1;
+        // Find matching } via brace counting
+        const char *obj_end = find_matching_brace(p, end_limit);
+        if (!obj_end) { ESP_LOGI(TAG, "每日: 第%d项后无匹配}}", count); break; }
+        p = strstr(obj_end + 1, "{\"fxDate\"");
     }
     forecast->count = count;
 
     ESP_LOGI(TAG, "每日预报: 获取了 %d 天数据", count);
     for (int i = 0; i < count; i++) {
-        ESP_LOGI(TAG, "  [%d] %s %d~%d°C %s", i,
+        ESP_LOGI(TAG, "  [%d] %s %d~%d°C", i,
                  forecast->days[i].fx_date,
                  forecast->days[i].temp_min,
-                 forecast->days[i].temp_max,
-                 forecast->days[i].text_day);
+                 forecast->days[i].temp_max);
     }
     return count > 0;
 }
@@ -639,5 +638,67 @@ bool weather_load_from_nvs(weather_data_t* data)
     ESP_LOGI(TAG, "从NVS加载天气数据: %s %d°C (更新于%lds前)",
              data->weather_text, data->temperature,
              (long)(time(NULL) - (time_t)data->update_time));
+    return true;
+}
+
+/* =========================================================================
+ * NVS persistence for hourly forecast
+ * ========================================================================= */
+bool weather_save_hourly_to_nvs(const hourly_forecast_t* data)
+{
+    if (!data) return false;
+    nvs_handle_t h;
+    if (nvs_open("weather", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_set_blob(h, "hourly_fc", data, sizeof(hourly_forecast_t));
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) { ESP_LOGW(TAG, "小时预报NVS保存失败: %s", esp_err_to_name(err)); return false; }
+    ESP_LOGI(TAG, "小时预报已保存到NVS (%d 小时)", data->count);
+    return true;
+}
+
+bool weather_load_hourly_from_nvs(hourly_forecast_t* data)
+{
+    if (!data) return false;
+    nvs_handle_t h;
+    if (nvs_open("weather", NVS_READONLY, &h) != ESP_OK) return false;
+    size_t size = sizeof(hourly_forecast_t);
+    esp_err_t err = nvs_get_blob(h, "hourly_fc", data, &size);
+    nvs_close(h);
+    if (err != ESP_OK) return false;
+    if (size != sizeof(hourly_forecast_t)) return false;
+    if (data->count <= 0 || data->count > HOURLY_MAX) return false;
+    ESP_LOGI(TAG, "从NVS加载小时预报: %d 小时", data->count);
+    return true;
+}
+
+/* =========================================================================
+ * NVS persistence for daily forecast
+ * ========================================================================= */
+bool weather_save_daily_to_nvs(const daily_forecast_t* data)
+{
+    if (!data) return false;
+    nvs_handle_t h;
+    if (nvs_open("weather", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_set_blob(h, "daily_fc", data, sizeof(daily_forecast_t));
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) { ESP_LOGW(TAG, "每日预报NVS保存失败: %s", esp_err_to_name(err)); return false; }
+    ESP_LOGI(TAG, "每日预报已保存到NVS (%d 天)", data->count);
+    return true;
+}
+
+bool weather_load_daily_from_nvs(daily_forecast_t* data)
+{
+    if (!data) return false;
+    nvs_handle_t h;
+    if (nvs_open("weather", NVS_READONLY, &h) != ESP_OK) return false;
+    size_t size = sizeof(daily_forecast_t);
+    esp_err_t err = nvs_get_blob(h, "daily_fc", data, &size);
+    nvs_close(h);
+    if (err != ESP_OK) return false;
+    if (size != sizeof(daily_forecast_t)) return false;
+    if (data->count <= 0 || data->count > DAILY_MAX) return false;
+    ESP_LOGI(TAG, "从NVS加载每日预报: %d 天", data->count);
     return true;
 }
