@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "weather.h"
 
 #define DISPLAY_WIDTH  240
 #define DISPLAY_HEIGHT 240
@@ -98,6 +99,20 @@ void display_config_success(void);
  * @param minute Minute (0-59)
  */
 void display_screensaver(int hour, int minute);
+
+/**
+ * @brief Display hourly forecast screen
+ * Shows up to 10 hourly forecasts in a 2+3+3+2 grid layout
+ * @param forecast Pointer to hourly forecast data
+ */
+void display_hourly_forecast(const hourly_forecast_t* forecast);
+
+/**
+ * @brief Display daily forecast screen
+ * Shows up to 7 daily forecasts in a 2+3+2 grid layout
+ * @param forecast Pointer to daily forecast data
+ */
+void display_daily_forecast(const daily_forecast_t* forecast);
 
 /**
  * @brief Deinitialize display

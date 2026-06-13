@@ -13,6 +13,8 @@ typedef struct _objects_t {
     lv_obj_t *badge_success;
     lv_obj_t *badge_loading;
     lv_obj_t *badge_config;
+    lv_obj_t *badge_hourly;
+    lv_obj_t *badge_daily;
     lv_obj_t *container_3;
     lv_obj_t *qweather_icons;
     lv_obj_t *label_6;
@@ -44,6 +46,8 @@ enum ScreensEnum {
     SCREEN_ID_BADGE_SUCCESS = 2,
     SCREEN_ID_BADGE_LOADING = 3,
     SCREEN_ID_BADGE_CONFIG = 4,
+    SCREEN_ID_BADGE_HOURLY = 5,
+    SCREEN_ID_BADGE_DAILY = 6,
 };
 
 void create_screen_badge_main();
@@ -58,6 +62,12 @@ void delete_screen_badge_loading();
 void create_screen_badge_config();
 void tick_screen_badge_config();
 void delete_screen_badge_config();
+void create_screen_badge_hourly();
+void tick_screen_badge_hourly();
+void delete_screen_badge_hourly();
+void create_screen_badge_daily();
+void tick_screen_badge_daily();
+void delete_screen_badge_daily();
 
 void tick_screen_by_id(enum ScreensEnum screenId);
 void tick_screen(int screen_index);

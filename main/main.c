@@ -47,6 +47,15 @@ static bool s_has_weather = false;
 static uint32_t s_last_weather_update = 0;  // epoch seconds
 static uint32_t s_boot_count = 0;
 
+// Forecast data (fetched alongside current weather)
+static hourly_forecast_t s_hourly_forecast = {0};
+static daily_forecast_t s_daily_forecast = {0};
+static bool s_has_forecast = false;
+
+// Screen navigation index for short-press WAKE cycling
+// 0 = main, 1 = hourly, 2 = daily
+static int s_screen_page = 0;
+
 // =============================================================================
 // Helper: format update-time string
 // =============================================================================
@@ -185,6 +194,9 @@ static void enter_display_mode(void)
     // Initialize button handler
     button_init();
 
+    // Reset screen to main page
+    s_screen_page = 0;
+
     // Show main screen with current data
     time_t now;
     time(&now);
@@ -247,7 +259,9 @@ static void enter_display_mode(void)
             time_sync_in_progress = false;
         }
 
-        // WAKE button long press -> exit to low power mode
+        // WAKE button handling:
+        //   Long press (while held) → exit to low power mode
+        //   Short press (after release) → cycle between main/hourly/daily screens
         if (button_is_pressed(BUTTON_WAKE)) {
             button_event_t event = button_get_event(BUTTON_WAKE);
             if (event == BUTTON_EVENT_LONG_PRESS) {
@@ -256,6 +270,49 @@ static void enter_display_mode(void)
                     vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 break;
+            }
+        } else {
+            // Button not pressed — check for short press event (fired on release)
+            button_event_t wake_short = button_get_event(BUTTON_WAKE);
+            if (wake_short == BUTTON_EVENT_PRESS) {
+                s_screen_page = (s_screen_page + 1) % 3;  // 0→1→2→0
+                timeout_counter = 0;
+
+                if (s_screen_page == 0) {
+                    // Main screen
+                    time(&now);
+                    tm_info = localtime(&now);
+                    format_update_time(update_str, sizeof(update_str), s_last_weather_update);
+                    display_main_screen(
+                        tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+                        s_has_weather ? s_weather_data.weather_code : 100,
+                        s_has_weather ? s_weather_data.weather_text : "晴",
+                        s_has_weather ? s_weather_data.temperature : 25,
+                        s_has_weather ? s_weather_data.humidity : 0,
+                        s_has_weather ? s_weather_data.wind_scale : 0,
+                        update_str);
+                    ESP_LOGI(TAG, "切换到主界面");
+                } else if (s_screen_page == 1) {
+                    // Hourly forecast
+                    if (s_has_forecast) {
+                        loadScreen(SCREEN_ID_BADGE_HOURLY);
+                        display_hourly_forecast(&s_hourly_forecast);
+                    } else {
+                        ESP_LOGW(TAG, "无小时预报数据，显示主界面");
+                        s_screen_page = 0;
+                    }
+                    ESP_LOGI(TAG, "切换到小时预报界面");
+                } else if (s_screen_page == 2) {
+                    // Daily forecast
+                    if (s_has_forecast) {
+                        loadScreen(SCREEN_ID_BADGE_DAILY);
+                        display_daily_forecast(&s_daily_forecast);
+                    } else {
+                        ESP_LOGW(TAG, "无每日预报数据，显示主界面");
+                        s_screen_page = 0;
+                    }
+                    ESP_LOGI(TAG, "切换到每日预报界面");
+                }
             }
         }
 
@@ -278,6 +335,11 @@ static void enter_display_mode(void)
                         s_weather_data.temperature, s_weather_data.humidity,
                         s_weather_data.wind_scale, update_str);
                     ESP_LOGI(TAG, "天气更新成功");
+                    // Also fetch forecast data
+                    weather_fetch_hourly(&s_hourly_forecast);
+                    weather_fetch_daily(&s_daily_forecast);
+                    if (s_hourly_forecast.count > 0 || s_daily_forecast.count > 0)
+                        s_has_forecast = true;
                 } else {
                     ESP_LOGW(TAG, "天气获取失败");
                 }
@@ -438,6 +500,15 @@ static bool enter_update_mode(void)
 
         ESP_LOGI(TAG, "天气更新成功: code=%d temp=%d",
                  s_weather_data.weather_code, s_weather_data.temperature);
+
+        // Fetch hourly and daily forecast data (best-effort, WiFi still up)
+        if (weather_fetch_hourly(&s_hourly_forecast)) {
+            s_has_forecast = true;
+        }
+        if (weather_fetch_daily(&s_daily_forecast)) {
+            s_has_forecast = true;
+        }
+
         return true;
     } else {
         ESP_LOGW(TAG, "天气获取失败");

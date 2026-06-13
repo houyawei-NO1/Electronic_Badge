@@ -359,9 +359,12 @@ tick_screen_func_t tick_screen_funcs[] = {
     tick_screen_badge_success,
     tick_screen_badge_loading,
     tick_screen_badge_config,
+    tick_screen_badge_hourly,
+    tick_screen_badge_daily,
 };
 void tick_screen(int screen_index) {
-    tick_screen_funcs[screen_index]();
+    if (screen_index >= 0 && screen_index < (int)(sizeof(tick_screen_funcs)/sizeof(tick_screen_funcs[0])))
+        tick_screen_funcs[screen_index]();
 }
 void tick_screen_by_id(enum ScreensEnum screenId) {
     tick_screen_funcs[screenId - 1]();
@@ -421,6 +424,21 @@ void delete_screen_badge_config() {
     objects.label_5 = 0;
 }
 
+void delete_screen_badge_hourly() {
+    if (objects.badge_hourly != NULL) {
+        pp_anim_stop_timelines_for_deleted_tree(objects.badge_hourly);
+        lv_obj_del(objects.badge_hourly);
+    }
+    objects.badge_hourly = 0;
+}
+
+void delete_screen_badge_daily() {
+    if (objects.badge_daily != NULL) {
+        pp_anim_stop_timelines_for_deleted_tree(objects.badge_daily);
+        lv_obj_del(objects.badge_daily);
+    }
+    objects.badge_daily = 0;
+}
 
 typedef void (*delete_screen_func_t)();
 delete_screen_func_t delete_screen_funcs[] = {
@@ -428,6 +446,8 @@ delete_screen_func_t delete_screen_funcs[] = {
     delete_screen_badge_success,
     delete_screen_badge_loading,
     delete_screen_badge_config,
+    delete_screen_badge_hourly,
+    delete_screen_badge_daily,
 };
 void delete_screen_by_id(enum ScreensEnum screenId) {
     delete_screen_funcs[screenId - 1]();
@@ -435,7 +455,6 @@ void delete_screen_by_id(enum ScreensEnum screenId) {
 
 void create_screens() {
     lv_disp_t *dispp = lv_disp_get_default();
-    // Use dark theme (true) to match the editor's appearance - white text on dark buttons
     lv_theme_t *theme = lv_theme_default_init(dispp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_RED), true, LV_FONT_DEFAULT);
     lv_disp_set_theme(dispp, theme);
 
@@ -443,4 +462,38 @@ void create_screens() {
     create_screen_badge_success();
     create_screen_badge_loading();
     create_screen_badge_config();
+    create_screen_badge_hourly();
+    create_screen_badge_daily();
 }
+
+/* =========================================================================
+ * Hourly forecast screen — skeleton only (dynamic content in display.c)
+ * ========================================================================= */
+void create_screen_badge_hourly()
+{
+    lv_obj_t *obj = lv_obj_create(0);
+    objects.badge_hourly = obj;
+    lv_obj_set_pos(obj, 0, 0);
+    lv_obj_set_size(obj, 240, 240);
+    lv_obj_set_style_bg_color(obj, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    tick_screen_badge_hourly();
+}
+
+void tick_screen_badge_hourly() {}
+
+/* =========================================================================
+ * Daily forecast screen — skeleton only (dynamic content in display.c)
+ * ========================================================================= */
+void create_screen_badge_daily()
+{
+    lv_obj_t *obj = lv_obj_create(0);
+    objects.badge_daily = obj;
+    lv_obj_set_pos(obj, 0, 0);
+    lv_obj_set_size(obj, 240, 240);
+    lv_obj_set_style_bg_color(obj, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    tick_screen_badge_daily();
+}
+
+void tick_screen_badge_daily() {}

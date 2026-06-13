@@ -150,7 +150,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t* evt)
 
 // Static buffers to avoid stack overflow
 static http_response_t s_resp_info;
-static char s_response[4096];
+static char s_response[8192];  // Must be large enough for the biggest JSON (~4400 bytes for 24h hourly)
 
 bool weather_fetch(weather_data_t* data)
 {
@@ -180,7 +180,7 @@ bool weather_fetch(weather_data_t* data)
         .timeout_ms = 10000,
         .skip_cert_common_name_check = true,  // Skip CN check for development
         .disable_auto_redirect = false,
-        .buffer_size = 4096,
+        .buffer_size = 8192,
         .buffer_size_tx = 1024,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -358,6 +358,219 @@ if (resp_info->is_gzip) {
              data->pressure, data->visibility);
 
     return true;
+}
+
+/* =========================================================================
+ * Hourly forecast (24h endpoint)
+ * ========================================================================= */
+bool weather_fetch_hourly(hourly_forecast_t* forecast)
+{
+    if (!forecast) return false;
+
+    memset(&s_resp_info, 0, sizeof(s_resp_info));
+    memset(s_response, 0, sizeof(s_response));
+    forecast->count = 0;
+
+    char url[512];
+    snprintf(url, sizeof(url),
+             "https://%s/v7/weather/24h?key=%s&location=%s",
+             WEATHER_API_HOST, WEATHER_API_KEY, WEATHER_LOCATION);
+    ESP_LOGI(TAG, "小时预报请求: %s", url);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .event_handler = http_event_handler,
+        .user_data = &s_resp_info,
+        .timeout_ms = 10000,
+        .skip_cert_common_name_check = true,
+        .disable_auto_redirect = false,
+        .buffer_size = 4096,
+        .buffer_size_tx = 1024,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) { ESP_LOGE(TAG, "小时预报: 初始化HTTP客户端失败"); return false; }
+
+    esp_http_client_set_header(client, "Accept-Encoding", "identity;q=1.0, *;q=0");
+    esp_http_client_set_header(client, "User-Agent", "ESP32-Badge/1.0");
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "小时预报: HTTP请求失败: %s", esp_err_to_name(err)); esp_http_client_cleanup(client); return false; }
+
+    int status_code = esp_http_client_get_status_code(client);
+    if (status_code != 200) { ESP_LOGE(TAG, "小时预报: HTTP状态码: %d", status_code); esp_http_client_cleanup(client); return false; }
+    esp_http_client_cleanup(client);
+
+    // Decompress if gzip
+    if (s_resp_info.is_gzip) {
+        size_t decompressed_len = sizeof(s_response);
+        memset(s_response, 0, sizeof(s_response));
+        if (!gzip_decompress((const uint8_t*)s_resp_info.raw_data, s_resp_info.raw_len, s_response, &decompressed_len))
+            { ESP_LOGE(TAG, "小时预报: 解压失败"); return false; }
+    } else {
+        memcpy(s_response, s_resp_info.raw_data, s_resp_info.raw_len);
+        s_response[s_resp_info.raw_len] = '\0';
+    }
+
+    // Check API code
+    char vb[64];
+    if (!json_get_string(s_response, "code", vb, sizeof(vb)) || strcmp(vb, "200") != 0)
+        { ESP_LOGE(TAG, "小时预报: API错误 code=%s", vb); return false; }
+
+    // Find "hourly" array
+    const char *arr = strstr(s_response, "\"hourly\"");
+    if (!arr) { ESP_LOGE(TAG, "小时预报: 没有hourly数组"); return false; }
+
+    // Parse hourly items by scanning for each "{"
+    // Each object in the array: {"fxTime":"...","temp":"...","icon":"...","text":"...",...}
+    int count = 0;
+    const char *p = arr;
+    while (count < HOURLY_MAX) {
+        // Find the next "fxTime" key (start of next object in the array)
+        p = strstr(p, "\"fxTime\"");
+        if (!p) break;
+
+        // Rewind to find the opening { of this object
+        // The key is inside an object: ...},{"fxTime":"..."...}, so going backward
+        // from "fxTime" we should hit the { of this object
+        const char *obj_start = p;
+        // Count braces: go forward to find the }, then search from there
+        // Actually simpler: just search back from p for '{' within reasonable distance
+        while (obj_start > s_response && *obj_start != '{') obj_start--;
+        if (*obj_start != '{') { p += 1; continue; }
+
+        hourly_item_t *item = &forecast->hours[count];
+
+        if (json_get_string(obj_start, "fxTime", item->fx_time, sizeof(item->fx_time))) {
+            // Parse hour text "HH:MM" from fxTime "YYYY-MM-DDTHH:MM+08:00"
+            char *t = strchr(item->fx_time, 'T');
+            if (t) {
+                memmove(item->fx_time, t + 1, 5);  // keep "HH:MM"
+                item->fx_time[5] = '\0';
+            }
+        }
+        if (json_get_string(obj_start, "temp", vb, sizeof(vb))) item->temp = atoi(vb);
+        if (json_get_string(obj_start, "icon", vb, sizeof(vb))) item->icon = atoi(vb);
+        if (json_get_string(obj_start, "text", item->text, sizeof(item->text))) {}
+        if (json_get_string(obj_start, "pop", vb, sizeof(vb))) item->pop = atoi(vb);
+
+        count++;
+
+        // Advance past the ENTIRE current {object} to find the next one
+        const char *obj_end = strchr(obj_start + 1, '}');
+        if (!obj_end) break;
+        p = obj_end + 1;
+    }
+    forecast->count = count;
+
+    ESP_LOGI(TAG, "小时预报: 获取了 %d 个小时数据", count);
+    for (int i = 0; i < count && i < 10; i++) {
+        ESP_LOGI(TAG, "  [%d] %s %d°C icon=%d %s", i,
+                 forecast->hours[i].fx_time, forecast->hours[i].temp,
+                 forecast->hours[i].icon, forecast->hours[i].text);
+    }
+    return count > 0;
+}
+
+/* =========================================================================
+ * Daily forecast (7d endpoint)
+ * ========================================================================= */
+bool weather_fetch_daily(daily_forecast_t* forecast)
+{
+    if (!forecast) return false;
+
+    memset(&s_resp_info, 0, sizeof(s_resp_info));
+    memset(s_response, 0, sizeof(s_response));
+    forecast->count = 0;
+
+    char url[512];
+    snprintf(url, sizeof(url),
+             "https://%s/v7/weather/10d?key=%s&location=%s",
+             WEATHER_API_HOST, WEATHER_API_KEY, WEATHER_LOCATION);
+    ESP_LOGI(TAG, "每日预报请求: %s", url);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .event_handler = http_event_handler,
+        .user_data = &s_resp_info,
+        .timeout_ms = 10000,
+        .skip_cert_common_name_check = true,
+        .disable_auto_redirect = false,
+        .buffer_size = 4096,
+        .buffer_size_tx = 1024,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) { ESP_LOGE(TAG, "每日预报: 初始化HTTP客户端失败"); return false; }
+
+    esp_http_client_set_header(client, "Accept-Encoding", "identity;q=1.0, *;q=0");
+    esp_http_client_set_header(client, "User-Agent", "ESP32-Badge/1.0");
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err != ESP_OK) { ESP_LOGE(TAG, "每日预报: HTTP请求失败: %s", esp_err_to_name(err)); esp_http_client_cleanup(client); return false; }
+
+    int status_code = esp_http_client_get_status_code(client);
+    if (status_code != 200) { ESP_LOGE(TAG, "每日预报: HTTP状态码: %d", status_code); esp_http_client_cleanup(client); return false; }
+    esp_http_client_cleanup(client);
+
+    if (s_resp_info.is_gzip) {
+        size_t decompressed_len = sizeof(s_response);
+        memset(s_response, 0, sizeof(s_response));
+        if (!gzip_decompress((const uint8_t*)s_resp_info.raw_data, s_resp_info.raw_len, s_response, &decompressed_len))
+            { ESP_LOGE(TAG, "每日预报: 解压失败"); return false; }
+    } else {
+        memcpy(s_response, s_resp_info.raw_data, s_resp_info.raw_len);
+        s_response[s_resp_info.raw_len] = '\0';
+    }
+
+    char vb[64];
+    if (!json_get_string(s_response, "code", vb, sizeof(vb)) || strcmp(vb, "200") != 0)
+        { ESP_LOGE(TAG, "每日预报: API错误 code=%s", vb); return false; }
+
+    const char *arr = strstr(s_response, "\"daily\"");
+    if (!arr) { ESP_LOGE(TAG, "每日预报: 没有daily数组"); return false; }
+
+    // Parse daily items — same approach as hourly above
+    int count = 0;
+    const char *p = arr;
+    while (count < DAILY_MAX) {
+        p = strstr(p, "\"fxDate\"");
+        if (!p) break;
+
+        const char *obj_start = p;
+        while (obj_start > s_response && *obj_start != '{') obj_start--;
+        if (*obj_start != '{') { p += 1; continue; }
+
+        daily_item_t *item = &forecast->days[count];
+        if (json_get_string(obj_start, "fxDate", item->fx_date, sizeof(item->fx_date))) {}
+        if (json_get_string(obj_start, "tempMax", vb, sizeof(vb))) item->temp_max = atoi(vb);
+        if (json_get_string(obj_start, "tempMin", vb, sizeof(vb))) item->temp_min = atoi(vb);
+        if (json_get_string(obj_start, "iconDay", vb, sizeof(vb))) item->icon_day = atoi(vb);
+        if (json_get_string(obj_start, "iconNight", vb, sizeof(vb))) item->icon_night = atoi(vb);
+        if (json_get_string(obj_start, "textDay", item->text_day, sizeof(item->text_day))) {}
+        if (json_get_string(obj_start, "textNight", item->text_night, sizeof(item->text_night))) {}
+        count++;
+
+        // Advance past the entire {object}
+        const char *obj_end = strchr(obj_start + 1, '}');
+        if (!obj_end) break;
+        p = obj_end + 1;
+    }
+    forecast->count = count;
+
+    ESP_LOGI(TAG, "每日预报: 获取了 %d 天数据", count);
+    for (int i = 0; i < count; i++) {
+        ESP_LOGI(TAG, "  [%d] %s %d~%d°C %s", i,
+                 forecast->days[i].fx_date,
+                 forecast->days[i].temp_min,
+                 forecast->days[i].temp_max,
+                 forecast->days[i].text_day);
+    }
+    return count > 0;
 }
 
 /* =========================================================================

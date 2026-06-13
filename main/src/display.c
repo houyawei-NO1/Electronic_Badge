@@ -598,6 +598,214 @@ void display_loading_status(const char *status)
 }
 
 /* =========================================================================
+ * Hourly forecast display — dynamic widgets on badge_hourly
+ * =========================================================================
+ *
+ * Creates up to 10 forecast items in a 2+3+3+2 grid layout.
+ * Row height is ~55px (rows at y=8,63,118,173).
+ * Icon is 24x24 (zoom=128) to leave room for text below.
+ *
+ * 2-column rows (rows 1,4): icon centered → time + temp side-by-side on same line
+ * 3-column rows (rows 2,3): icon centered → time above → temp below */
+void display_hourly_forecast(const hourly_forecast_t* forecast)
+{
+    if (!is_initialized || !disp_handle || !forecast) return;
+
+    lvgl_port_lock(0);
+    lv_anim_del(NULL, NULL);
+
+    lv_obj_t *scr = objects.badge_hourly;
+    if (!scr) { lvgl_port_unlock(); return; }
+
+    lv_obj_clean(scr);
+
+    int n = forecast->count;
+    if (n > 10) n = 10;
+
+    // Row layout: [2, 3, 3, 2] for 10 items
+    int row_sizes[] = {2, 3, 3, 2};
+    int row_y[]     = {8, 63, 118, 173};
+    // Column centers (absolute x coordinates)
+    int col2_cx[] = {60, 180};
+    int col3_cx[] = {40, 120, 200};
+
+    int item_idx = 0;
+    for (int row = 0; row < 4 && item_idx < n; row++) {
+        int cols = row_sizes[row];
+        int *cx = (cols == 2) ? col2_cx : col3_cx;
+
+        for (int c = 0; c < cols && item_idx < n; c++, item_idx++) {
+            const hourly_item_t *h = &forecast->hours[item_idx];
+            int col_cx = cx[c];
+            int cy = row_y[row];
+
+            // Weather icon (24x24 at zoom=128, centered in cell)
+            lv_obj_t *icon = lv_img_create(scr);
+            if (h->icon > 0) {
+                display_prepare_weather_icon(h->icon);
+                if (cached_weather_icon.valid) {
+                    lv_img_set_src(icon, &cached_weather_icon.dsc);
+                    lv_img_set_zoom(icon, 128);
+                }
+            }
+            lv_obj_set_pos(icon, col_cx - 12, cy + 2);
+
+            // 2-column rows: time + temp side-by-side, one line below icon
+            if (cols == 2) {
+                lv_obj_t *tl = lv_label_create(scr);
+                lv_obj_set_style_text_font(tl, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(tl, lv_palette_main(LV_PALETTE_GREY), 0);
+                lv_label_set_text(tl, h->fx_time[0] ? h->fx_time : "--:--");
+                lv_obj_align(tl, LV_ALIGN_TOP_LEFT, col_cx - 20, cy + 30);
+
+                lv_obj_t *tl_temp = lv_label_create(scr);
+                lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d°", h->temp);
+                lv_label_set_text(tl_temp, buf);
+                lv_obj_align(tl_temp, LV_ALIGN_TOP_LEFT, col_cx + 6, cy + 30);
+            } else {
+                // 3-column rows: time above, temp below
+                lv_obj_t *tl = lv_label_create(scr);
+                lv_obj_set_style_text_font(tl, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(tl, lv_palette_main(LV_PALETTE_GREY), 0);
+                lv_label_set_text(tl, h->fx_time[0] ? h->fx_time : "--:--");
+                lv_obj_set_pos(tl, col_cx - 16, cy + 28);
+
+                lv_obj_t *tl_temp = lv_label_create(scr);
+                lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d°", h->temp);
+                lv_label_set_text(tl_temp, buf);
+                lv_obj_set_pos(tl_temp, col_cx + 4, cy + 40);
+            }
+        }
+    }
+
+    // Title
+    lv_obj_t *title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, &lv_font_simsun_16_cjk, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_label_set_text(title, "小时");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+
+    lvgl_port_unlock();
+}
+
+/* =========================================================================
+ * Daily forecast display — dynamic widgets on badge_daily
+ * =========================================================================
+ *
+ * Creates up to 10 forecast days in a 2+3+3+2 grid layout (same as hourly).
+ * Icon is 24x24 (zoom=128). 2-col rows: date + temp side-by-side.
+ * 3-col rows: date above, temp below. */
+void display_daily_forecast(const daily_forecast_t* forecast)
+{
+    if (!is_initialized || !disp_handle || !forecast) return;
+
+    lvgl_port_lock(0);
+    lv_anim_del(NULL, NULL);
+
+    lv_obj_t *scr = objects.badge_daily;
+    if (!scr) { lvgl_port_unlock(); return; }
+
+    lv_obj_clean(scr);
+
+    int n = forecast->count;
+    if (n > 10) n = 10;
+
+    // Row layout: [2, 3, 3, 2] for up to 10 days
+    int row_sizes[] = {2, 3, 3, 2};
+    int row_y[]     = {8, 63, 118, 173};
+    int col2_cx[] = {60, 180};
+    int col3_cx[] = {40, 120, 200};
+
+    int item_idx = 0;
+    for (int row = 0; row < 4 && item_idx < n; row++) {
+        int cols = row_sizes[row];
+        int *cx = (cols == 2) ? col2_cx : col3_cx;
+
+        for (int c = 0; c < cols && item_idx < n; c++, item_idx++) {
+            const daily_item_t *d = &forecast->days[item_idx];
+            int col_cx = cx[c];
+            int cy = row_y[row];
+
+            // Weather icon (24x24 at zoom=128)
+            lv_obj_t *icon = lv_img_create(scr);
+            if (d->icon_day > 0) {
+                display_prepare_weather_icon(d->icon_day);
+                if (cached_weather_icon.valid) {
+                    lv_img_set_src(icon, &cached_weather_icon.dsc);
+                    lv_img_set_zoom(icon, 128);
+                }
+            }
+            lv_obj_set_pos(icon, col_cx - 12, cy + 2);
+
+            // Build date label text
+            char day_label[16];
+            if (d->fx_date[0]) {
+                char *dash1 = strchr(d->fx_date, '-');
+                if (dash1) {
+                    dash1++;
+                    char *dash2 = strchr(dash1, '-');
+                    if (dash2)
+                        snprintf(day_label, sizeof(day_label), "%.2s/%.2s", dash1, dash2 + 1);
+                    else
+                        snprintf(day_label, sizeof(day_label), "%s", d->fx_date);
+                } else {
+                    snprintf(day_label, sizeof(day_label), "%s", d->fx_date);
+                }
+            } else {
+                snprintf(day_label, sizeof(day_label), "Day %d", item_idx + 1);
+            }
+
+            // 2-column rows: date + temp side-by-side, one line below icon
+            if (cols == 2) {
+                lv_obj_t *dl = lv_label_create(scr);
+                lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(dl, lv_palette_main(LV_PALETTE_GREY), 0);
+                lv_label_set_text(dl, day_label);
+                lv_obj_align(dl, LV_ALIGN_TOP_LEFT, col_cx - 20, cy + 26);
+
+                lv_obj_t *tl_temp = lv_label_create(scr);
+                lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%d/%d", d->temp_min, d->temp_max);
+                lv_label_set_text(tl_temp, buf);
+                lv_obj_align(tl_temp, LV_ALIGN_TOP_LEFT, col_cx + 6, cy + 26);
+            } else {
+                // 3-column rows: date above, temp below
+                lv_obj_t *dl = lv_label_create(scr);
+                lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(dl, lv_palette_main(LV_PALETTE_GREY), 0);
+                lv_label_set_text(dl, day_label);
+                lv_obj_set_pos(dl, col_cx - 16, cy + 28);
+
+                lv_obj_t *tl_temp = lv_label_create(scr);
+                lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
+                lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
+                char buf[24];
+                snprintf(buf, sizeof(buf), "%d/%d", d->temp_min, d->temp_max);
+                lv_label_set_text(tl_temp, buf);
+                lv_obj_set_pos(tl_temp, col_cx + 4, cy + 40);
+            }
+        }
+    }
+
+    // Title
+    lv_obj_t *title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_label_set_text(title, "10-Day");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+
+    lvgl_port_unlock();
+}
+
+/* =========================================================================
  * Config mode screen
  * ========================================================================= */
 void display_config_mode(void)
