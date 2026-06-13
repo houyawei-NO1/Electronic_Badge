@@ -57,11 +57,19 @@ def png_to_rgb565a(png_path: str, bin_path: str, size: int = ICON_SIZE) -> None:
     out += struct.pack("<HH", w, h)  # header: width, height (uint16 LE)
 
     # RGB565: RRRRR GGGGGG BBBBB → uint16, then alpha byte
+    #
+    # IMPORTANT: The source PNGs are "black + alpha" images — all pixels have
+    # R=G=B=0 and only alpha varies.  If we kept them as-is, the icons would
+    # be invisible on a black background.  Instead, we flip non-transparent
+    # pixels to white (R=G=B=255) so they appear as white icons on black.
     for i in range(0, len(pixels), 4):
         r = pixels[i]
         g = pixels[i + 1]
         b = pixels[i + 2]
         a = pixels[i + 3]
+        # Non-transparent pixels → white; transparent pixels stay black
+        if a > 0:
+            r = 255; g = 255; b = 255
         rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
         out += struct.pack("<H", rgb565)
         out += bytes([a])

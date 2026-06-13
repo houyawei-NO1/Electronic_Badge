@@ -129,7 +129,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t* evt)
             ESP_LOGD(TAG, "HTTP事件错误");
             break;
         case HTTP_EVENT_ON_HEADER:
-            ESP_LOGD(TAG, "HTTP头: %s: %s", evt->header_key, evt->header_value);
+            ESP_LOGI(TAG, "HTTP头: %s: %s", evt->header_key, evt->header_value);
             if (strcasecmp(evt->header_key, "Content-Encoding") == 0 &&
                 strcasecmp(evt->header_value, "gzip") == 0) {
                 resp_info->is_gzip = true;
@@ -171,7 +171,7 @@ bool weather_fetch(weather_data_t* data)
              WEATHER_API_KEY,
              WEATHER_LOCATION);
     
-    ESP_LOGD(TAG, "从 %s 获取天气", url);
+    ESP_LOGI(TAG, "请求URL: %s", url);
     
     esp_http_client_config_t config = {
         .url = url,
@@ -228,6 +228,14 @@ if (resp_info->is_gzip) {
     response[resp_info->raw_len] = '\0';
 }
     
+    // If response body is not too long, print it for debugging
+    size_t resp_len = strlen(response);
+    if (resp_len < 2000) {
+        ESP_LOGI(TAG, "响应: %s", response);
+    } else {
+        ESP_LOGI(TAG, "响应(截断): %.2000s...", response);
+    }
+
     // Check API code
     char value_buf[64];
     if (!json_get_string(response, "code", value_buf, sizeof(value_buf))) {

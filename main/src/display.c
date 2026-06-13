@@ -804,7 +804,7 @@ static const char *get_weather_name(int16_t code)
  * ========================================================================= */
 static int16_t icon_rotation_correction(int16_t code)
 {
-    if (code == 101) return -900;   /* "多云" PNG is rotated 90° */
+    if (code == 101) return 0;    /* "多云" PNG needs 90° CW */
     return 0;
 }
 
@@ -926,6 +926,7 @@ void display_main_screen(int hour, int minute, int wday,
     if (objects.qweather_icons) {
         if (cached_weather_icon.valid) {
             lv_img_set_src(objects.qweather_icons, &cached_weather_icon.dsc);
+
             ESP_LOGI(TAG, "[UI] 图标: 使用缓存 (%ux%u, code=%d)",
                      (unsigned)cached_weather_icon.dsc.header.w,
                      (unsigned)cached_weather_icon.dsc.header.h,
