@@ -627,34 +627,80 @@ void display_config_success(void)
 }
 
 /* =========================================================================
- * Screensaver (shown before entering deep-sleep)
+ * Screensaver — draw big clock covering badge_main, restore on wake
+ * =========================================================================
+ *
+ * CRITICAL DESIGN: We do NOT destroy any existing widgets.  We do NOT
+ * switch screens.  We do NOT create new badge_main screens.
+ *
+ * Instead, we create a full-screen opaque black container on top of ALL
+ * existing badge_main children.  The clock + hint text are drawn inside
+ * this container.  When the user wakes up, display_main_screen() simply
+ * deletes this container — the original badge_main widgets are intact
+ * underneath, and all objects.* pointers remain valid.
+ *
+ * This completely avoids all the previous crashes caused by:
+ *   - lv_obj_clean() → dangling objects.* pointers
+ *   - create_screen_badge_main() → new screen objects
+ *   - lv_scr_load() / lv_disp_load_scr() → LVGL internal animation crashes
  * ========================================================================= */
+static lv_obj_t *screensaver_overlay = NULL;
+
 void display_screensaver(int hour, int minute)
 {
     if (!is_initialized || !disp_handle) return;
 
     lvgl_port_lock(0);
-    lv_obj_t *scr = lv_disp_get_scr_act(disp_handle);
-    lv_obj_clean(scr);
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
+    // Kill all pending animations
+    lv_anim_del(NULL, NULL);
+
+    // Stop colon blink timer — it accesses objects.label_time
     if (colon_blink_timer) {
         lv_timer_del(colon_blink_timer);
         colon_blink_timer = NULL;
     }
-    lv_anim_del(NULL, NULL);
 
-    lv_obj_t *label_time = lv_label_create(scr);
-    lv_obj_set_style_text_font(label_time, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(label_time, lv_color_white(), 0);
-    lv_obj_set_style_text_align(label_time, LV_TEXT_ALIGN_CENTER, 0);
+    // Remove old overlay if present (shouldn't happen, but be safe)
+    if (screensaver_overlay) {
+        lv_obj_del(screensaver_overlay);
+        screensaver_overlay = NULL;
+    }
+
+    // Create full-screen opaque black container on the display's TOP LAYER.
+    //
+    // lv_disp_get_layer_top(disp_handle) returns a special top-layer of the
+    // display that sits ABOVE all screens (badge_main, badge_loading, etc.)
+    // without being part of any screen's widget tree.  This means:
+    //   - lv_obj_del(screensaver_overlay) will NOT affect badge_main children
+    //   - badge_main widget pointers (objects.label_time etc.) stay valid
+    //   - No LVGL style/tree corruption from deleting the overlay
+    //   - The overlay appears on top regardless of which screen is active
+    //
+    // Previously we used lv_obj_create(scr) (child of badge_main), and
+    // deleting it from a different active screen corrupted LVGL internals.
+    lv_obj_t *layer = lv_disp_get_layer_top(disp_handle);
+    screensaver_overlay = lv_obj_create(layer);
+    lv_obj_set_pos(screensaver_overlay, 0, 0);
+    lv_obj_set_size(screensaver_overlay, 240, 240);
+    lv_obj_set_style_bg_color(screensaver_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(screensaver_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(screensaver_overlay, 0, 0);
+    lv_obj_set_style_pad_all(screensaver_overlay, 0, 0);
+    lv_obj_clear_flag(screensaver_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Big clock centered
+    lv_obj_t *label_clock = lv_label_create(screensaver_overlay);
+    lv_obj_set_style_text_font(label_clock, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(label_clock, lv_color_white(), 0);
+    lv_obj_set_style_text_align(label_clock, LV_TEXT_ALIGN_CENTER, 0);
     char buf[16];
     snprintf(buf, sizeof(buf), "%02d:%02d", hour, minute);
-    lv_label_set_text(label_time, buf);
-    lv_obj_center(label_time);
+    lv_label_set_text(label_clock, buf);
+    lv_obj_center(label_clock);
 
-    lv_obj_t *label_hint = lv_label_create(scr);
+    // Hint text at the bottom
+    lv_obj_t *label_hint = lv_label_create(screensaver_overlay);
     lv_obj_set_style_text_font(label_hint, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(label_hint, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_label_set_text(label_hint, "Press WAKE");
@@ -820,38 +866,59 @@ void display_main_screen(int hour, int minute, int wday,
 
     lv_anim_del(NULL, NULL);
 
-    /* Only load screen if not already on main screen — avoids fade-in
-     * animation delay which can cause black screen on first boot */
+    /* Delete screensaver overlay if present.
+     * The overlay is a full-screen black container drawn on top of
+     * badge_main children.  Deleting it reveals the intact badge_main
+     * widgets underneath — all objects.* pointers are still valid. */
+    if (screensaver_overlay) {
+        lv_obj_del(screensaver_overlay);
+        screensaver_overlay = NULL;
+    }
+
+    /* Load badge_main screen if not already active (first boot).
+     * After screensaver, badge_main is still the active screen (we never
+     * switched away), so this is skipped — avoiding the screen switch
+     * animation that caused crashes. */
     lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
     if (!act || act != objects.badge_main) {
         loadScreen(SCREEN_ID_BADGE_MAIN);
-        act = lv_disp_get_scr_act(disp_handle);
     }
-    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
 
     /* Time + colon blink timer */
     if (objects.label_time) {
         /* Use simsun font so Chinese weekday (周一~周日) renders correctly */
         lv_obj_set_style_text_font(objects.label_time, &lv_font_simsun_16_cjk, 0);
         lv_obj_set_style_text_color(objects.label_time, lv_color_white(), 0);
-        last_hour = hour;
-        last_minute = minute;
-        last_wday = wday;
+
+        /* Always get time from system clock directly (like screensaver does).
+         * Do NOT rely on caller-provided hour/minute because those may be
+         * stale or wrong (e.g. after wifi_disconnect resets the clock). */
+        time_t now;
+        time(&now);
+        struct tm *tm_now = localtime(&now);
+        last_hour = tm_now->tm_hour;
+        last_minute = tm_now->tm_min;
+        last_wday = tm_now->tm_wday;
+
         char buf[48];
-        snprintf(buf, sizeof(buf), "%02d:%02d  %s", hour, minute, wday_name(wday));
+        snprintf(buf, sizeof(buf), "%02d:%02d  %s",
+                 last_hour, last_minute, wday_name(last_wday));
         lv_label_set_text(objects.label_time, buf);
 
         if (colon_blink_timer) lv_timer_del(colon_blink_timer);
         colon_blink_timer = lv_timer_create(colon_blink_timer_cb, 500, NULL);
     }
 
-    /* Date */
+    /* Date — always from system clock */
     if (objects.label_date) {
         lv_obj_set_style_text_font(objects.label_date, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(objects.label_date, lv_color_white(), 0);
+        time_t now;
+        time(&now);
+        struct tm *tm_now = localtime(&now);
         char date_buf[32];
-        snprintf(date_buf, sizeof(date_buf), "%d.%d.%d", 2026, 6, 10);
+        snprintf(date_buf, sizeof(date_buf), "%d.%d.%d",
+                 tm_now->tm_year + 1900, tm_now->tm_mon + 1, tm_now->tm_mday);
         lv_label_set_text(objects.label_date, date_buf);
     }
 

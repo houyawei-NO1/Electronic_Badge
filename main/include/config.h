@@ -80,7 +80,7 @@
 #endif
 
 #define WIFI_CONNECT_TIMEOUT_MS  20000  // 20 seconds per config
-#define WIFI_MAX_RETRY     10           // Max retry attempts per config
+#define WIFI_MAX_RETRY     3           // Max retry attempts per config
 
 // SmartConfig timeout (5 minutes)
 #define SMARTCONFIG_TIMEOUT_MS  (5 * 60 * 1000)
@@ -110,7 +110,7 @@
 // NTP Configuration
 // =============================================================================
 #define NTP_SERVER_1       "ntp.aliyun.com"
-#define NTP_SERVER_2       "cn.ntp.org.cn"
+#define NTP_SERVER_2       "time.pool.aliyun.com"
 // Note: Timezone is set in code using setenv("TZ", "Asia/Shanghai", 1)
 
 // =============================================================================

@@ -503,8 +503,8 @@ CONFIG_APP_PROJECT_NAME="electronic_badge"
 #
 # WiFi Configuration
 #
-CONFIG_WIFI_SSID="TP-LINK_D975"
-CONFIG_WIFI_PASSWORD="13137785160111"
+CONFIG_WIFI_SSID="TP"
+CONFIG_WIFI_PASSWORD="131377851"
 CONFIG_MAX_WIFI_CONFIGS=5
 # end of WiFi Configuration
 
@@ -534,7 +534,7 @@ CONFIG_SPI_CLOCK_MHZ=20
 #
 # Debug Configuration
 #
-# CONFIG_DEBUG_MODE is not set
+CONFIG_DEBUG_MODE=y
 CONFIG_DEBUG_LOG_LEVEL=3
 # end of Debug Configuration
 # end of Electronic Badge Configuration
@@ -830,7 +830,7 @@ CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
 # ESP-Driver:USB Serial/JTAG Configuration
 #
 CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
-# CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION is not set
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 # end of ESP-Driver:USB Serial/JTAG Configuration
 
 #

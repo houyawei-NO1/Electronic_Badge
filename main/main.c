@@ -30,6 +30,7 @@
 #include "nvs_flash.h"
 #include "esp_netif_sntp.h"
 
+
 #include "config.h"
 #include "power.h"
 #include "button.h"
@@ -76,10 +77,17 @@ static bool system_time_valid(void)
 // =============================================================================
 // Helper: sync system time via SNTP
 // =============================================================================
-static void sync_time(void)
+/**
+ * @brief Synchronize system time via NTP
+ * @return epoch seconds on success, 0 on failure
+ *
+ * IMPORTANT: The returned epoch must be re-applied via settimeofday()
+ * AFTER wifi_disconnect(), because esp_wifi_stop() resets the system clock.
+ */
+static time_t sync_time(void)
 {
     ESP_LOGI(TAG, "正在同步NTP时间...");
-    esp_sntp_config_t sntp_conf = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_sntp_config_t sntp_conf = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER_1);
     esp_netif_sntp_init(&sntp_conf);
 
     int retry = 0;
@@ -96,8 +104,10 @@ static void sync_time(void)
         ESP_LOGI(TAG, "NTP同步成功: %04d-%02d-%02d %02d:%02d:%02d",
                  tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
                  tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+        return now;  // 返回 epoch，调用方在 wifi_disconnect() 后重新设置
     } else {
         ESP_LOGW(TAG, "NTP同步超时");
+        return 0;
     }
 }
 
@@ -115,7 +125,49 @@ static void set_system_time_from_epoch(uint32_t epoch)
 }
 
 // =============================================================================
-// Mode: Active Display (user viewing the screen)
+// Helper: safe WiFi disconnect (preserves system time across esp_wifi_stop)
+// =============================================================================
+/**
+ * esp_wifi_stop() resets the system clock. This helper saves the current
+ * time before disconnecting and restores it afterwards.
+ */
+static void wifi_disconnect_safe(void)
+{
+    time_t now;
+    time(&now);
+    wifi_disconnect();
+    // Restore time after esp_wifi_stop() cleared it
+    if (now > 1577836800L) {  // valid: after 2020-01-01
+        struct timeval tv = { .tv_sec = now, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+    }
+}
+
+// Forward declarations (static functions defined later in this file)
+static void enter_config_mode(void);
+
+// =============================================================================
+// Helper: refresh main screen with current RAM data (used after time sync)
+// =============================================================================
+static void refresh_main_screen(void)
+{
+    time_t now;
+    time(&now);
+    struct tm* tm_info = localtime(&now);
+    char update_str[32] = {0};
+    format_update_time(update_str, sizeof(update_str), s_last_weather_update);
+    display_main_screen(
+        tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+        s_has_weather ? s_weather_data.weather_code : 100,
+        s_has_weather ? s_weather_data.weather_text : "晴",
+        s_has_weather ? s_weather_data.temperature : 25,
+        s_has_weather ? s_weather_data.humidity : 0,
+        s_has_weather ? s_weather_data.wind_scale : 0,
+        update_str);
+}
+
+// =============================================================================
+// Mode: Display (main screen with time + weather)
 // =============================================================================
 static void enter_display_mode(void)
 {
@@ -149,6 +201,10 @@ static void enter_display_mode(void)
         s_has_weather ? s_weather_data.wind_scale : 0,
         update_str);
 
+    // 后台静默同步时间标志（只执行一次）
+    bool time_synced = system_time_valid();
+    bool time_sync_in_progress = false;
+
     // Main loop: handle buttons for DISPLAY_TIMEOUT seconds
     uint32_t timeout_counter = 0;
     while (1) {
@@ -156,6 +212,40 @@ static void enter_display_mode(void)
         timeout_counter += 100;
 
         ui_tick();
+
+        // --- 后台静默时间同步（用户无感知）---
+        // 如果系统时间无效（年份 < 2020），后台连 WiFi 同步 NTP，
+        // 同步成功后静默刷新主界面的时间显示，不中断用户操作。
+        if (!time_synced && !time_sync_in_progress) {
+            ESP_LOGI(TAG, "系统时间无效，后台同步时间...");
+            time_sync_in_progress = true;
+
+            bool sync_ok = false;
+
+            // 优先尝试 NTP 同步
+            if (wifi_connect()) {
+                sync_time();
+                wifi_disconnect_safe();  // 自动保护系统时间不被 esp_wifi_stop() 清除
+                sync_ok = system_time_valid();
+            }
+
+            // NTP 失败或 WiFi 连不上 → 用天气 update_time 兜底
+            if (!sync_ok && s_has_weather && s_weather_data.update_time > 1577836800UL) {
+                ESP_LOGW(TAG, "NTP失败，用天气API时间兜底");
+                set_system_time_from_epoch(s_weather_data.update_time);
+                sync_ok = system_time_valid();
+            }
+
+            if (sync_ok) {
+                time_synced = true;
+                ESP_LOGI(TAG, "后台时间同步成功，刷新显示");
+                refresh_main_screen();
+            } else {
+                ESP_LOGW(TAG, "后台时间同步失败，时间可能不准确");
+            }
+
+            time_sync_in_progress = false;
+        }
 
         // WAKE button long press -> exit to low power mode
         if (button_is_pressed(BUTTON_WAKE)) {
@@ -191,7 +281,7 @@ static void enter_display_mode(void)
                 } else {
                     ESP_LOGW(TAG, "天气获取失败");
                 }
-                wifi_disconnect();
+                wifi_disconnect_safe();
             } else {
                 ESP_LOGW(TAG, "WiFi连接失败");
                 display_loading("WiFi ERROR");
@@ -202,10 +292,11 @@ static void enter_display_mode(void)
         // REFRESH button long press -> enter config mode
         else if (refresh_event == BUTTON_EVENT_LONG_PRESS) {
             ESP_LOGI(TAG, "长按REFRESH键，进入配网模式");
-            display_config_mode();
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            // Return to display mode after showing config screen
-            timeout_counter = 0;
+            enter_config_mode();
+            // enter_config_mode 内部成功后会自动进入更新+显示模式，
+            // 失败后直接返回。不管成功失败，都跳出当前显示循环
+            // 回到 while(1) 主循环重新判断。
+            break;
         }
 
         // Timeout -> exit to low power mode
@@ -225,9 +316,9 @@ static void enter_low_power_mode(void)
 {
     ESP_LOGI(TAG, "=== 低功耗模式 ===");
 
-    // ✅ 在这里才启用自动 tickless light sleep
-    // 之前一直保持 CPU 全速，保证 UART 日志正常输出
-    power_enable_light_sleep();
+    // 注意: power_enable_light_sleep() 和 power_disable_light_sleep()
+    // 现在由 power_enter_low_power_mode() 在内部管理（仅真正 light sleep 路径启用，
+    // USB 连接走软件轮询时不启用）。这里不用再调它们。
 
     // Show screensaver with current time
     time_t now;
@@ -238,7 +329,7 @@ static void enter_low_power_mode(void)
     // Ensure WiFi is disconnected in low power mode
     if (wifi_is_connected()) {
         ESP_LOGI(TAG, "低功耗模式: 断开WiFi");
-        wifi_disconnect();
+        wifi_disconnect_safe();
     }
 
     // Light sleep loop: wake up every minute to refresh time
@@ -248,11 +339,6 @@ static void enter_low_power_mode(void)
         if (!timer_wakeup) {
             // GPIO wakeup (button pressed) -> return to caller to re-enter display mode
             ESP_LOGI(TAG, "按键唤醒，进入显示模式");
-            // ✅ 禁用自动 light sleep，恢复 CPU 全速
-            //    否则唤醒后所有 vTaskDelay 仍会进入自动 light sleep，导致日志停摆
-            power_disable_light_sleep();
-            // 给系统一点时间从 light sleep 恢复到全速，确保后续日志正常输出
-            vTaskDelay(pdMS_TO_TICKS(50));
             return;
         }
 
@@ -365,6 +451,8 @@ static bool enter_update_mode(void)
 static void enter_config_mode(void)
 {
     ESP_LOGI(TAG, "=== 配网模式 ===");
+    uint32_t timeout_counter = 0;
+    bool config_success = false;  // 初始默认失败
 
     if (!display_is_initialized()) {
         if (display_init() != ESP_OK) {
@@ -386,42 +474,51 @@ static void enter_config_mode(void)
 
     ESP_LOGI(TAG, "SmartConfig已启动，等待手机...");
 
-    uint32_t timeout_counter = 0;
-    bool config_success = false;
 
-    while (timeout_counter < SMARTCONFIG_TIMEOUT_MS) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-        timeout_counter += 500;
 
-        if (wifi_is_connected()) {
-            ESP_LOGI(TAG, "配网成功!");
-            display_config_success();
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            config_success = true;
-            break;
-        }
+while (timeout_counter < SMARTCONFIG_TIMEOUT_MS) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    timeout_counter += 500;
 
-        if (button_is_pressed(BUTTON_WAKE)) {
-            button_event_t event = button_get_event(BUTTON_WAKE);
-            if (event == BUTTON_EVENT_LONG_PRESS) {
-                ESP_LOGI(TAG, "长按WAKE键，退出配网");
-                while (button_is_pressed(BUTTON_WAKE)) {
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                }
-                break;
+    if (wifi_is_connected()) {
+        ESP_LOGI(TAG, "配网成功!");
+        display_config_success();
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        config_success = true;
+        break;
+    }
+
+    if (button_is_pressed(BUTTON_WAKE)) {
+        button_event_t event = button_get_event(BUTTON_WAKE);
+        if (event == BUTTON_EVENT_LONG_PRESS) {
+            ESP_LOGI(TAG, "长按WAKE键，退出配网");
+            while (button_is_pressed(BUTTON_WAKE)) {
+                vTaskDelay(pdMS_TO_TICKS(50));
             }
-        }
-
-        if (timeout_counter % 2000 == 0) {
-            int dots = (timeout_counter / 2000) % 4;
-            char progress[32];
-            snprintf(progress, sizeof(progress), "配网中%.*s", dots, "...");
-            display_loading(progress);
+            break;
         }
     }
 
+    if (timeout_counter % 2000 == 0) {
+        int dots = (timeout_counter / 2000) % 4;
+        char progress[32];
+        snprintf(progress, sizeof(progress), "Wechat SmartConfig%.*s", dots, "...");
+        display_loading(progress);
+        }
+    }
+
+// 走到这里只有两种情况：超时 / 按键退出，统一保持 false
+// 上方只有配网成功分支会改成 true
+
 config_cleanup:
-    wifi_stop_smartconfig();
+    if (config_success) {
+        // 配网成功：只停止 SmartConfig，保持 WiFi 连接不断
+        // 由后续的 enter_update_mode() 直接使用已连好的 WiFi
+        wifi_smartconfig_done();
+    } else {
+        // 配网失败/退出：完全停止 SmartConfig 和 WiFi
+        wifi_stop_smartconfig();
+    }
     button_reset();
 
     if (config_success) {

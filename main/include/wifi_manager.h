@@ -82,6 +82,15 @@ bool wifi_start_smartconfig(void);
 void wifi_stop_smartconfig(void);
 
 /**
+ * @brief Stop SmartConfig but keep WiFi connection alive
+ *
+ * Use this after SmartConfig successfully connected to an AP.
+ * Unlike wifi_stop_smartconfig(), this does NOT call esp_wifi_stop(),
+ * so the ongoing WiFi connection is preserved for subsequent NTP/weather updates.
+ */
+void wifi_smartconfig_done(void);
+
+/**
  * @brief WiFi event handler (call from app_main)
  * @param arg Event context
  * @param event_base Event base

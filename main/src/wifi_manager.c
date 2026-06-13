@@ -61,54 +61,7 @@ bool wifi_connect(void)
         s_wifi_initialized = true;
     }
     
-    // Priority 1: Try sdkconfig default WiFi first
-    const char* default_ssid = CONFIG_WIFI_SSID;
-    const char* default_pass = CONFIG_WIFI_PASSWORD;
-    
-    if (default_ssid && strlen(default_ssid) > 0) {
-        ESP_LOGI(TAG_WIFI, "========================================");
-        ESP_LOGI(TAG_WIFI, "优先级1: 尝试sdkconfig默认WiFi");
-        ESP_LOGI(TAG_WIFI, "WiFi名称: %s", default_ssid);
-        
-        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT);
-        s_retry_num = 0;
-        
-        wifi_config_t wifi_config = {
-            .sta = {
-                .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-                .pmf_cfg = { .capable = true, .required = false },
-            },
-        };
-        
-        strncpy((char*)wifi_config.sta.ssid, default_ssid, sizeof(wifi_config.sta.ssid));
-        strncpy((char*)wifi_config.sta.password, default_pass, sizeof(wifi_config.sta.password));
-        
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        // Note: WIFI_EVENT_STA_START will trigger esp_wifi_connect() in event handler
-        
-        ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                               CONNECTED_BIT | WIFI_FAIL_BIT,
-                                               pdTRUE,
-                                               pdFALSE,
-                                               pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
-        
-        if (bits & CONNECTED_BIT) {
-            s_wifi_status = WIFI_STATUS_CONNECTED;
-            ESP_LOGI(TAG_WIFI, "成功: 连接到sdkconfig默认WiFi: %s", default_ssid);
-            return true;
-        } else {
-            ESP_LOGW(TAG_WIFI, "sdkconfig默认WiFi失败，尝试NVS配置...");
-            esp_wifi_disconnect();
-            esp_wifi_stop();
-        }
-    } else {
-        ESP_LOGI(TAG_WIFI, "没有sdkconfig默认WiFi，尝试NVS配置...");
-    }
-    
-    // Priority 2: Try NVS saved configurations
+    // Priority 1: Try NVS saved configurations first
     bool has_nvs_config = false;
     for (int i = 0; i < WIFI_MAX_CONFIGS; i++) {
         if (!s_configs[i].valid) continue;
@@ -159,6 +112,46 @@ bool wifi_connect(void)
         ESP_LOGW(TAG_WIFI, "未找到NVS WiFi配置");
     }
     
+    // Priority 2: Fall back to sdkconfig default WiFi (e.g. first boot)
+    const char* default_ssid = CONFIG_WIFI_SSID;
+    const char* default_pass = CONFIG_WIFI_PASSWORD;
+    
+    if (default_ssid && strlen(default_ssid) > 0) {
+        ESP_LOGI(TAG_WIFI, "========================================");
+        ESP_LOGI(TAG_WIFI, "NVS失败，尝试sdkconfig默认WiFi");
+        ESP_LOGI(TAG_WIFI, "WiFi名称: %s", default_ssid);
+        
+        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT);
+        s_retry_num = 0;
+        
+        wifi_config_t wifi_config = {
+            .sta = {
+                .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+                .pmf_cfg = { .capable = true, .required = false },
+            },
+        };
+        
+        strncpy((char*)wifi_config.sta.ssid, default_ssid, sizeof(wifi_config.sta.ssid));
+        strncpy((char*)wifi_config.sta.password, default_pass, sizeof(wifi_config.sta.password));
+        
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        
+        ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                               CONNECTED_BIT | WIFI_FAIL_BIT,
+                                               pdTRUE,
+                                               pdFALSE,
+                                               pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
+        
+        if (bits & CONNECTED_BIT) {
+            s_wifi_status = WIFI_STATUS_CONNECTED;
+            ESP_LOGI(TAG_WIFI, "成功: 连接到sdkconfig默认WiFi: %s", default_ssid);
+            return true;
+        }
+    }
+    
     s_wifi_status = WIFI_STATUS_DISCONNECTED;
     return false;
 }
@@ -207,13 +200,20 @@ bool wifi_save_config(const char* ssid, const char* password)
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) return false;
-    
+
     char key[16];
     snprintf(key, sizeof(key), "%s%d", NVS_KEY_WIFI_PREFIX, slot);
-    
-    err = nvs_set_blob(nvs_handle, key, &s_configs[slot], sizeof(wifi_config_t));
+
+    err = nvs_set_blob(nvs_handle, key, &s_configs[slot], sizeof(wifi_manager_config_t));
+    if (err != ESP_OK) {
+        nvs_close(nvs_handle);
+        return false;
+    }
+
+    // ⚠️ 必须 nvs_commit，否则数据只写在缓存中，复位后丢失！
+    err = nvs_commit(nvs_handle);
     nvs_close(nvs_handle);
-    
+
     return err == ESP_OK;
 }
 
@@ -301,6 +301,15 @@ void wifi_stop_smartconfig(void)
     s_smartconfig_active = false;
 }
 
+void wifi_smartconfig_done(void)
+{
+    // 只停止 SmartConfig，不停止 WiFi 连接
+    // 配网成功后后续需要立即使用 WiFi 做 NTP 同步和天气更新
+    esp_smartconfig_stop();
+    s_smartconfig_active = false;
+    ESP_LOGI(TAG_WIFI, "SmartConfig 已完成，保持WiFi连接");
+}
+
 // 扫描附近 AP 并打印信号强度（用于对比天线性能）
 static void wifi_scan_ap_rssi(void);
 
@@ -377,11 +386,17 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                 memcpy(config.sta.password, evt->password, sizeof(config.sta.password));
                 
                 ESP_LOGI("SmartConfig", "WiFi名称: %s", config.sta.ssid);
-                
+
+                // 官方 demo 流程: 先 disconnect → set_config → connect
+                // 必须先在 SmartConfig sniffer 模式下断开，才能正确应用新配置
+                esp_wifi_disconnect();
                 ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
-                
-                // Save the new config
+                ESP_LOGI("SmartConfig", "WiFi配置已设置，开始连接...");
+
+                // 保存配置到 NVS
                 wifi_save_config((char*)config.sta.ssid, (char*)config.sta.password);
+
+                esp_wifi_connect();
                 break;
             default:
                 break;
