@@ -16,6 +16,7 @@
 static wifi_status_t s_wifi_status = WIFI_STATUS_IDLE;
 static bool s_smartconfig_active = false;
 static bool s_wifi_initialized = false;
+static bool s_scan_in_progress = false;
 static EventGroupHandle_t s_wifi_event_group;
 static const int CONNECTED_BIT = BIT0;
 static const int WIFI_FAIL_BIT = BIT1;
@@ -24,6 +25,11 @@ static const char *TAG_WIFI = "WiFi";
 
 // Default configs stored in flash
 static wifi_manager_config_t s_configs[WIFI_MAX_CONFIGS];
+
+static bool wifi_ssid_is_visible(const char* target_ssid,
+                                 char visible_ssids[][33],
+                                 int visible_count);
+static bool wifi_scan_visible_ssids(char visible_ssids[][33], int max_count, int* out_count);
 
 void wifi_manager_init(void)
 {
@@ -60,13 +66,39 @@ bool wifi_connect(void)
         
         s_wifi_initialized = true;
     }
+
+    s_scan_in_progress = true;
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_disconnect();
+
+    char visible_ssids[WIFI_MAX_CONFIGS][33];
+    int visible_count = 0;
+    bool scan_ok = wifi_scan_visible_ssids(visible_ssids, WIFI_MAX_CONFIGS, &visible_count);
+
+    if (!scan_ok || visible_count == 0) {
+        ESP_LOGW(TAG_WIFI, "未扫描到附近可用AP，跳过WiFi连接尝试");
+        s_scan_in_progress = false;
+        s_wifi_status = WIFI_STATUS_DISCONNECTED;
+        return false;
+    }
+
+    s_scan_in_progress = false;
+    ESP_LOGI(TAG_WIFI, "扫描到 %d 个附近AP，按可见SSID筛选候选配置", visible_count);
     
-    // Priority 1: Try NVS saved configurations first
+    // Priority 1: Try NVS saved configurations first, but only if their SSID is visible nearby
     bool has_nvs_config = false;
+    bool has_matching_nvs_config = false;
     for (int i = 0; i < WIFI_MAX_CONFIGS; i++) {
         if (!s_configs[i].valid) continue;
         has_nvs_config = true;
 
+        if (!wifi_ssid_is_visible(s_configs[i].ssid, visible_ssids, visible_count)) {
+            ESP_LOGI(TAG_WIFI, "跳过NVS配置 %s（附近未扫描到该SSID）", s_configs[i].ssid);
+            continue;
+        }
+
+        has_matching_nvs_config = true;
         xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT);
         s_retry_num = 0;
         
@@ -97,6 +129,7 @@ bool wifi_connect(void)
         if (bits & CONNECTED_BIT) {
             s_wifi_status = WIFI_STATUS_CONNECTED;
             ESP_LOGI(TAG_WIFI, "成功: 连接到NVS配置: %s", s_configs[i].ssid);
+            s_scan_in_progress = false;
             return true;
         } else if (bits & WIFI_FAIL_BIT) {
             ESP_LOGW(TAG_WIFI, "失败: 达到最大重试次数: %s", s_configs[i].ssid);
@@ -110,48 +143,56 @@ bool wifi_connect(void)
     
     if (!has_nvs_config) {
         ESP_LOGW(TAG_WIFI, "未找到NVS WiFi配置");
+    } else if (!has_matching_nvs_config) {
+        ESP_LOGW(TAG_WIFI, "附近未扫描到任何NVS配置对应的SSID，跳过NVS连接尝试");
     }
     
-    // Priority 2: Fall back to sdkconfig default WiFi (e.g. first boot)
+    // Priority 2: Fall back to sdkconfig default WiFi only when it is visible nearby
     const char* default_ssid = CONFIG_WIFI_SSID;
     const char* default_pass = CONFIG_WIFI_PASSWORD;
     
     if (default_ssid && strlen(default_ssid) > 0) {
-        ESP_LOGI(TAG_WIFI, "========================================");
-        ESP_LOGI(TAG_WIFI, "NVS失败，尝试sdkconfig默认WiFi");
-        ESP_LOGI(TAG_WIFI, "WiFi名称: %s", default_ssid);
-        
-        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT);
-        s_retry_num = 0;
-        
-        wifi_config_t wifi_config = {
-            .sta = {
-                .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-                .pmf_cfg = { .capable = true, .required = false },
-            },
-        };
-        
-        strncpy((char*)wifi_config.sta.ssid, default_ssid, sizeof(wifi_config.sta.ssid));
-        strncpy((char*)wifi_config.sta.password, default_pass, sizeof(wifi_config.sta.password));
-        
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        
-        ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                               CONNECTED_BIT | WIFI_FAIL_BIT,
-                                               pdTRUE,
-                                               pdFALSE,
-                                               pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
-        
-        if (bits & CONNECTED_BIT) {
-            s_wifi_status = WIFI_STATUS_CONNECTED;
-            ESP_LOGI(TAG_WIFI, "成功: 连接到sdkconfig默认WiFi: %s", default_ssid);
-            return true;
+        if (!wifi_ssid_is_visible(default_ssid, visible_ssids, visible_count)) {
+            ESP_LOGI(TAG_WIFI, "默认WiFi %s 不在附近扫描结果中，跳过", default_ssid);
+        } else {
+            ESP_LOGI(TAG_WIFI, "========================================");
+            ESP_LOGI(TAG_WIFI, "附近可见，尝试sdkconfig默认WiFi");
+            ESP_LOGI(TAG_WIFI, "WiFi名称: %s", default_ssid);
+            
+            xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT | WIFI_FAIL_BIT);
+            s_retry_num = 0;
+            
+            wifi_config_t wifi_config = {
+                .sta = {
+                    .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+                    .pmf_cfg = { .capable = true, .required = false },
+                },
+            };
+            
+            strncpy((char*)wifi_config.sta.ssid, default_ssid, sizeof(wifi_config.sta.ssid));
+            strncpy((char*)wifi_config.sta.password, default_pass, sizeof(wifi_config.sta.password));
+            
+            ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+            ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+            ESP_ERROR_CHECK(esp_wifi_start());
+            
+            ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
+            EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                                   CONNECTED_BIT | WIFI_FAIL_BIT,
+                                                   pdTRUE,
+                                                   pdFALSE,
+                                                   pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
+            
+            if (bits & CONNECTED_BIT) {
+                s_wifi_status = WIFI_STATUS_CONNECTED;
+                ESP_LOGI(TAG_WIFI, "成功: 连接到sdkconfig默认WiFi: %s", default_ssid);
+                s_scan_in_progress = false;
+                return true;
+            }
         }
     }
     
+    s_scan_in_progress = false;
     s_wifi_status = WIFI_STATUS_DISCONNECTED;
     return false;
 }
@@ -310,6 +351,74 @@ void wifi_smartconfig_done(void)
     ESP_LOGI(TAG_WIFI, "SmartConfig 已完成，保持WiFi连接");
 }
 
+static bool wifi_ssid_is_visible(const char* target_ssid,
+                                  char visible_ssids[][33],
+                                  int visible_count)
+{
+    if (!target_ssid || target_ssid[0] == '\0' || !visible_ssids || visible_count <= 0) {
+        return false;
+    }
+
+    for (int i = 0; i < visible_count; i++) {
+        if (strcmp(target_ssid, visible_ssids[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool wifi_scan_visible_ssids(char visible_ssids[][33], int max_count, int* out_count)
+{
+    if (!visible_ssids || max_count <= 0 || !out_count) {
+        return false;
+    }
+
+    *out_count = 0;
+
+    uint16_t ap_count = 0;
+    esp_err_t ret = esp_wifi_scan_start(NULL, true);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG_WIFI, "WiFi扫描失败: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ret = esp_wifi_scan_get_ap_num(&ap_count);
+    if (ret != ESP_OK || ap_count == 0) {
+        ESP_LOGI(TAG_WIFI, "未扫描到任何 AP");
+        return false;
+    }
+
+    if (ap_count > 10) {
+        ap_count = 10;
+    }
+
+    wifi_ap_record_t* ap_list = malloc(ap_count * sizeof(wifi_ap_record_t));
+    if (!ap_list) {
+        ESP_LOGW(TAG_WIFI, "内存不足，无法分配 AP 列表");
+        return false;
+    }
+
+    ret = esp_wifi_scan_get_ap_records(&ap_count, ap_list);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG_WIFI, "获取 AP 记录失败: %s", esp_err_to_name(ret));
+        free(ap_list);
+        return false;
+    }
+
+    for (int i = 0; i < (int)ap_count && *out_count < max_count; i++) {
+        if (ap_list[i].ssid[0] == '\0') {
+            continue;
+        }
+        memset(visible_ssids[*out_count], 0, 33);
+        strncpy(visible_ssids[*out_count], (const char*)ap_list[i].ssid, 32);
+        (*out_count)++;
+    }
+
+    free(ap_list);
+    return *out_count > 0;
+}
+
 // 扫描附近 AP 并打印信号强度（用于对比天线性能）
 static void wifi_scan_ap_rssi(void);
 
@@ -319,6 +428,10 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
     if (event_base == WIFI_EVENT) {
         switch (event_id) {
             case WIFI_EVENT_STA_START:
+                if (s_scan_in_progress) {
+                    ESP_LOGI(TAG_WIFI, "扫描阶段，跳过自动连接");
+                    break;
+                }
                 ESP_LOGI(TAG_WIFI, "WiFi STA已启动，连接中...");
                 esp_wifi_connect();
                 break;
@@ -330,6 +443,9 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                     
                     if (s_smartconfig_active) {
                         // In SmartConfig mode, just clear connected bit
+                        xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT);
+                    } else if (s_scan_in_progress) {
+                        ESP_LOGI(TAG_WIFI, "扫描阶段，忽略自动重连");
                         xEventGroupClearBits(s_wifi_event_group, CONNECTED_BIT);
                     } else {
                         // Normal mode: retry connection
@@ -407,32 +523,36 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
 // 扫描附近 AP 并打印信号强度（RSSI），用于对比天线性能
 static void wifi_scan_ap_rssi(void)
 {
-    uint16_t ap_count = 0;
-    
+    char visible_ssids[WIFI_MAX_CONFIGS][33];
+    int visible_count = 0;
+    if (!wifi_scan_visible_ssids(visible_ssids, WIFI_MAX_CONFIGS, &visible_count)) {
+        ESP_LOGW(TAG_WIFI, "未扫描到任何 AP");
+        return;
+    }
+
     ESP_LOGI(TAG_WIFI, "===== 附近 WiFi 信号扫描 =====");
-    
-    // 扫描（阻塞式，最多 1 秒）
+    ESP_LOGI(TAG_WIFI, "扫描到 %d 个 AP (按信号强度排序):", visible_count);
+    ESP_LOGI(TAG_WIFI, " %-20s  RSSI  CH  Auth", "SSID");
+    ESP_LOGI(TAG_WIFI, " --------------------  ----  --  ----");
+
+    uint16_t ap_count = 0;
     esp_err_t ret = esp_wifi_scan_start(NULL, true);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG_WIFI, "WiFi扫描失败: %s", esp_err_to_name(ret));
         return;
     }
-    
-    // 获取扫描结果数量
-    esp_wifi_scan_get_ap_num(&ap_count);
-    if (ap_count == 0) {
+
+    ret = esp_wifi_scan_get_ap_num(&ap_count);
+    if (ret != ESP_OK || ap_count == 0) {
         ESP_LOGW(TAG_WIFI, "未扫描到任何 AP");
-        esp_wifi_scan_get_ap_records(&ap_count, NULL);
         return;
     }
-    
-    // 限制最多显示 10 个
+
     if (ap_count > 10) ap_count = 10;
     
     wifi_ap_record_t* ap_list = malloc(ap_count * sizeof(wifi_ap_record_t));
     if (!ap_list) {
         ESP_LOGW(TAG_WIFI, "内存不足，无法分配 AP 列表");
-        esp_wifi_scan_get_ap_records(&ap_count, NULL);
         return;
     }
     
@@ -453,11 +573,7 @@ static void wifi_scan_ap_rssi(void)
             }
         }
     }
-    
-    ESP_LOGI(TAG_WIFI, "扫描到 %d 个 AP (按信号强度排序):", ap_count);
-    ESP_LOGI(TAG_WIFI, " %-20s  RSSI  CH  Auth", "SSID");
-    ESP_LOGI(TAG_WIFI, " --------------------  ----  --  ----");
-    
+
     for (int i = 0; i < (int)ap_count; i++) {
         const char* auth_str = (ap_list[i].authmode == WIFI_AUTH_OPEN) ? "OPEN" : "WPA";
         ESP_LOGI(TAG_WIFI, " %-20s  %4d  %2d  %s",

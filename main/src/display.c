@@ -71,6 +71,8 @@ typedef struct {
 
 static cached_icon_t cached_weather_icon;
 static bool is_initialized = false;
+static lv_img_dsc_t s_forecast_icon_descs[10];
+static uint8_t *s_forecast_icon_pixels[10] = {0};
 
 bool display_is_initialized(void)
 {
@@ -123,6 +125,81 @@ static esp_err_t init_spiffs(void)
         ESP_LOGI(TAG, "SPIFFS: total=%dKB, used=%dKB", total / 1024, used / 1024);
     }
     return ESP_OK;
+}
+
+static void cleanup_forecast_icons(void)
+{
+    for (int i = 0; i < 10; i++) {
+        if (s_forecast_icon_pixels[i]) {
+            free(s_forecast_icon_pixels[i]);
+            s_forecast_icon_pixels[i] = NULL;
+        }
+        memset(&s_forecast_icon_descs[i], 0, sizeof(s_forecast_icon_descs[i]));
+    }
+}
+
+static bool load_weather_icon_into_slot(int16_t weather_code, int slot, lv_img_dsc_t *out_dsc)
+{
+    if (!out_dsc || slot < 0 || slot >= 10) {
+        return false;
+    }
+
+    if (s_forecast_icon_pixels[slot]) {
+        free(s_forecast_icon_pixels[slot]);
+        s_forecast_icon_pixels[slot] = NULL;
+    }
+    memset(&s_forecast_icon_descs[slot], 0, sizeof(s_forecast_icon_descs[slot]));
+
+    char path[64];
+    weather_code_to_bin_path(weather_code, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "[图标] 二进制文件不存在: %s", path);
+        return false;
+    }
+
+    uint8_t hdr[4];
+    size_t nr = fread(hdr, 1, sizeof(hdr), f);
+    if (nr != sizeof(hdr)) {
+        ESP_LOGE(TAG, "[图标] 读 header 失败: %s", path);
+        fclose(f);
+        return false;
+    }
+
+    uint16_t w = (uint16_t)((uint16_t)hdr[1] << 8 | hdr[0]);
+    uint16_t h = (uint16_t)((uint16_t)hdr[3] << 8 | hdr[2]);
+    uint32_t pixel_bytes = (uint32_t)w * (uint32_t)h * 3U;
+    uint32_t total_bytes = 4U + pixel_bytes;
+
+    uint8_t *buf = (uint8_t *)malloc(total_bytes);
+    if (!buf) {
+        ESP_LOGE(TAG, "[图标] malloc 失败 (%u bytes)", (unsigned)total_bytes);
+        fclose(f);
+        return false;
+    }
+
+    buf[0] = hdr[0]; buf[1] = hdr[1];
+    buf[2] = hdr[2]; buf[3] = hdr[3];
+
+    nr = fread(buf + 4, 1, pixel_bytes, f);
+    fclose(f);
+    if (nr != pixel_bytes) {
+        ESP_LOGE(TAG, "[图标] 像素数据不完整: %s (got %zu, want %u)",
+                 path, nr, (unsigned)pixel_bytes);
+        free(buf);
+        return false;
+    }
+
+    out_dsc->header.always_zero = 0;
+    out_dsc->header.w = w;
+    out_dsc->header.h = h;
+    out_dsc->header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA;
+    out_dsc->data_size = pixel_bytes;
+    out_dsc->data = buf + 4;
+    s_forecast_icon_pixels[slot] = buf;
+
+    return true;
 }
 
 /* =========================================================================
@@ -667,6 +744,7 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
     if (!scr) { lvgl_port_unlock(); return; }
 
     lv_obj_clean(scr);
+    cleanup_forecast_icons();
 
     int n = forecast->count;
     if (n > 10) n = 10;
@@ -689,9 +767,8 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
            
             lv_obj_t *icon = lv_img_create(scr);
             if (h->icon > 0) {
-                display_prepare_weather_icon(h->icon);
-                if (cached_weather_icon.valid) {
-                    lv_img_set_src(icon, &cached_weather_icon.dsc);
+                if (load_weather_icon_into_slot(h->icon, item_idx, &s_forecast_icon_descs[item_idx])) {
+                    lv_img_set_src(icon, &s_forecast_icon_descs[item_idx]);
                     lv_img_set_zoom(icon, 140);
                 }
             }
@@ -762,6 +839,7 @@ void display_daily_forecast(const daily_forecast_t* forecast)
     if (!scr) { lvgl_port_unlock(); return; }
 
     lv_obj_clean(scr);
+    cleanup_forecast_icons();
 
     int n = forecast->count;
     if (n > 10) n = 10;
@@ -784,9 +862,8 @@ void display_daily_forecast(const daily_forecast_t* forecast)
             
             lv_obj_t *icon = lv_img_create(scr);
             if (d->icon_day > 0) {
-                display_prepare_weather_icon(d->icon_day);
-                if (cached_weather_icon.valid) {
-                    lv_img_set_src(icon, &cached_weather_icon.dsc);
+                if (load_weather_icon_into_slot(d->icon_day, item_idx, &s_forecast_icon_descs[item_idx])) {
+                    lv_img_set_src(icon, &s_forecast_icon_descs[item_idx]);
                     lv_img_set_zoom(icon, 140);
                 }
             }
@@ -824,7 +901,7 @@ void display_daily_forecast(const daily_forecast_t* forecast)
                 lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
                 char buf[24];
-                snprintf(buf, sizeof(buf), "%d-%d", d->temp_min, d->temp_max);
+                snprintf(buf, sizeof(buf), "%d/%d", d->temp_min, d->temp_max);
                 lv_label_set_text(tl_temp, buf);
                 lv_obj_set_pos(tl_temp, col_cx + 12, cy + 36);
             }

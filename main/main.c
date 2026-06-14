@@ -157,6 +157,7 @@ static void wifi_disconnect_safe(void)
 
 // Forward declarations (static functions defined later in this file)
 static void enter_config_mode(void);
+static bool enter_update_mode(bool show_loading_ui);
 
 // =============================================================================
 // Helper: refresh main screen with current RAM data (used after time sync)
@@ -323,41 +324,10 @@ static void enter_display_mode(void)
         button_event_t refresh_event = button_get_event(BUTTON_REFRESH);
         if (refresh_event == BUTTON_EVENT_PRESS) {
             ESP_LOGI(TAG, "短按REFRESH键，手动更新天气");
-            if (wifi_connect()) {
-                sync_time();
-                if (weather_fetch(&s_weather_data)) {
-                    s_has_weather = true;
-                    s_last_weather_update = s_weather_data.update_time;
-
-                    time(&now);
-                    tm_info = localtime(&now);
-                    format_update_time(update_str, sizeof(update_str), s_last_weather_update);
-                    display_main_screen(
-                        tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
-                        s_weather_data.weather_code, s_weather_data.weather_text,
-                        s_weather_data.temperature, s_weather_data.humidity,
-                        s_weather_data.wind_scale, update_str);
-                    ESP_LOGI(TAG, "天气更新成功");
-                    // Also fetch forecast data
-                    time_t fetch_now = time(NULL);
-                    if (weather_fetch_hourly(&s_hourly_forecast)) {
-                        s_has_hourly = true;
-                        s_last_hourly_update = (uint32_t)fetch_now;
-                        weather_save_hourly_to_nvs(&s_hourly_forecast);
-                    }
-                    if (weather_fetch_daily(&s_daily_forecast)) {
-                        s_has_daily = true;
-                        s_last_daily_update = (uint32_t)fetch_now;
-                        weather_save_daily_to_nvs(&s_daily_forecast);
-                    }
-                } else {
-                    ESP_LOGW(TAG, "天气获取失败");
-                }
-                wifi_disconnect_safe();
+            if (enter_update_mode(true)) {
+                ESP_LOGI(TAG, "天气更新成功");
             } else {
-                ESP_LOGW(TAG, "WiFi连接失败");
-                display_loading("WiFi ERROR");
-                vTaskDelay(pdMS_TO_TICKS(1000));
+                ESP_LOGW(TAG, "天气获取失败或WiFi连接失败");
             }
             timeout_counter = 0;  // Reset timeout after interaction
         }
@@ -439,7 +409,7 @@ static void enter_low_power_mode(void)
 // =============================================================================
 // Mode: Weather Update (connect WiFi, fetch weather, then display)
 // =============================================================================
-static bool enter_update_mode(void)
+static bool enter_update_mode(bool show_loading_ui)
 {
     ESP_LOGI(TAG, "=== 更新模式 ===");
 
@@ -450,23 +420,32 @@ static bool enter_update_mode(void)
         }
     }
     display_backlight_on();
-    display_loading("正在配置WIF");
+
+    if (show_loading_ui) {
+        display_loading("正在配置WIF");
+    }
 
     // Connect to WiFi
-    display_loading_status("正在配置WIF");
+    if (show_loading_ui) {
+        display_loading_status("正在配置WIF");
+    }
     if (!wifi_connect()) {
         ESP_LOGW(TAG, "WiFi连接失败");
-        display_loading("WiFi ERROR");
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (show_loading_ui) {
+            display_loading("WiFi ERROR");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
         return false;
     }
 
     // Sync time
-    display_loading_status("正在同步");
+    if (show_loading_ui) {
+        display_loading_status("正在同步");
+    }
     sync_time();
 
-    // Show main screen with cached data first
-    {
+    // Show main screen with cached data first only for manual refresh
+    if (show_loading_ui) {
         time_t now;
         time(&now);
         struct tm* tm_info = localtime(&now);
@@ -496,17 +475,19 @@ static bool enter_update_mode(void)
         // Save to NVS so data persists across reboots/wakeups
         weather_save_to_nvs(&s_weather_data);
 
-        // Refresh screen with new data
-        time_t now;
-        time(&now);
-        struct tm* tm_info = localtime(&now);
-        char update_str[32];
-        format_update_time(update_str, sizeof(update_str), s_last_weather_update);
-        display_main_screen(
-            tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
-            s_weather_data.weather_code, s_weather_data.weather_text,
-            s_weather_data.temperature, s_weather_data.humidity,
-            s_weather_data.wind_scale, update_str);
+        // Refresh screen with new data only for manual refresh
+        if (show_loading_ui) {
+            time_t now;
+            time(&now);
+            struct tm* tm_info = localtime(&now);
+            char update_str[32];
+            format_update_time(update_str, sizeof(update_str), s_last_weather_update);
+            display_main_screen(
+                tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+                s_weather_data.weather_code, s_weather_data.weather_text,
+                s_weather_data.temperature, s_weather_data.humidity,
+                s_weather_data.wind_scale, update_str);
+        }
 
         ESP_LOGI(TAG, "天气更新成功: code=%d temp=%d",
                  s_weather_data.weather_code, s_weather_data.temperature);
@@ -609,7 +590,7 @@ config_cleanup:
 
     if (config_success) {
         ESP_LOGI(TAG, "配网成功，更新天气...");
-        if (enter_update_mode()) {
+        if (enter_update_mode(true)) {
             enter_display_mode();
         }
     } else {
@@ -727,7 +708,7 @@ void app_main(void)
 
         if (need_update) {
             ESP_LOGI(TAG, "天气数据过期或缺失，进入更新模式");
-            if (enter_update_mode()) {
+            if (enter_update_mode(false)) {
                 ESP_LOGI(TAG, "天气更新成功，进入显示模式");
             } else {
                 ESP_LOGW(TAG, "天气更新失败，使用缓存数据进入显示模式");
