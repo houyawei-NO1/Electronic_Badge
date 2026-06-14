@@ -1,5 +1,5 @@
 {
-  "idf.currentSetup": "d:\\esp\\v5.5.2\\esp-idf",
+  "idf.currentSetup": "D:\\esp\\v5.5.2\\esp-idf",
   "idf.customExtraVars": {
     "OPENOCD_SCRIPTS": "d:\\esp\\.espressif\\tools\\openocd-esp32\\v0.12.0-esp32-20240318/openocd-esp32/share/openocd/scripts",
     "IDF_CCACHE_ENABLE": "1",
@@ -13,8 +13,9 @@
     "--compile-commands-dir=e:\\HouYawei\\01.ESP32Project\\Electronic Badge\\build"
   ],
   "idf.flashType": "UART",
-  "idf.portWin": "COM9",
+  "idf.portWin": "COM3",
   "idf.openOcdConfigs": [
-    "board/esp32c3-builtin.cfg"
-  ]
+    "board/esp32c3-ftdi.cfg"
+  ],
+  "idf.buildParallelJobs": 2
 }

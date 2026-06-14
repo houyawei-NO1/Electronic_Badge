@@ -668,7 +668,7 @@ void display_loading_status(const char *status)
  * =========================================================================
  *
  * Creates up to 10 forecast items in a 2+3+3+2 grid.
- * 2-col rows: icon → time(left) + temp(right) side-by-side
+ * 2-col rows: icon → time(above) + temp(below)
  * 3-col rows: icon → time(above) + temp(below) */
 void display_hourly_forecast(const hourly_forecast_t* forecast)
 {
@@ -686,8 +686,8 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
     if (n > 10) n = 10;
 
     int row_sizes[] = {2, 3, 3, 2};
-    int row_y[]     = {8, 63, 118, 173};
-    int col2_cx[] = {60, 180};
+    int row_y[]     = {20, 64, 108, 155};
+    int col2_cx[] = {75, 165};
     int col3_cx[] = {40, 120, 200};
 
     int item_idx = 0;
@@ -700,13 +700,13 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
             int col_cx = cx[c];
             int cy = row_y[row];
 
-            // Icon ~20x20 (zoom=110)
+           
             lv_obj_t *icon = lv_img_create(scr);
             if (h->icon > 0) {
                 display_prepare_weather_icon(h->icon);
                 if (cached_weather_icon.valid) {
                     lv_img_set_src(icon, &cached_weather_icon.dsc);
-                    lv_img_set_zoom(icon, 120);
+                    lv_img_set_zoom(icon, 140);
                 }
             }
             lv_obj_set_pos(icon, col_cx - 20, cy + 2);
@@ -715,12 +715,12 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
             if (h->icon > 0) apply_icon_animation(icon, h->icon);
 
             if (cols == 2) {
-                // 2-col: time + temp side-by-side
+                // 2-col: time + temp(below)
                 lv_obj_t *tl = lv_label_create(scr);
                 lv_obj_set_style_text_font(tl, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(tl, lv_palette_main(LV_PALETTE_GREY), 0);
                 lv_label_set_text(tl, h->fx_time[0] ? h->fx_time : "--:--");
-                lv_obj_align(tl, LV_ALIGN_TOP_LEFT, col_cx - 25, cy + 36);
+                lv_obj_align(tl, LV_ALIGN_TOP_LEFT, col_cx - 30, cy + 36);
 
                 lv_obj_t *tl_temp = lv_label_create(scr);
                 lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
@@ -753,7 +753,7 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
     lv_obj_set_style_text_font(title, &lv_font_simsun_16_cjk, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_label_set_text(title, "小时");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 5);
 
     lvgl_port_unlock();
 }
@@ -763,7 +763,7 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
  * =========================================================================
  *
  * Creates up to 10 forecast days in a 2+3+3+2 grid.
- * 2-col rows: icon → date(left) + temp(right) side-by-side
+ * 2-col rows: icon → date(above) +temp(below)
  * 3-col rows: icon → date(above) + temp(below) */
 void display_daily_forecast(const daily_forecast_t* forecast)
 {
@@ -781,8 +781,8 @@ void display_daily_forecast(const daily_forecast_t* forecast)
     if (n > 10) n = 10;
 
     int row_sizes[] = {2, 3, 3, 2};
-    int row_y[]     = {8, 63, 118, 173};
-    int col2_cx[] = {60, 180};
+    int row_y[]     = {20, 64, 108, 155};
+    int col2_cx[] = {75, 165};
     int col3_cx[] = {40, 120, 200};
 
     int item_idx = 0;
@@ -795,16 +795,16 @@ void display_daily_forecast(const daily_forecast_t* forecast)
             int col_cx = cx[c];
             int cy = row_y[row];
 
-            // Icon ~20x20 (zoom=110)
+            
             lv_obj_t *icon = lv_img_create(scr);
             if (d->icon_day > 0) {
                 display_prepare_weather_icon(d->icon_day);
                 if (cached_weather_icon.valid) {
                     lv_img_set_src(icon, &cached_weather_icon.dsc);
-                    lv_img_set_zoom(icon, 110);
+                    lv_img_set_zoom(icon, 140);
                 }
             }
-            lv_obj_set_pos(icon, col_cx-50, cy + 2);
+           lv_obj_set_pos(icon, col_cx - 20, cy + 2);
 
             // Apply same motion animation as main screen
             if (d->icon_day > 0) apply_icon_animation(icon, d->icon_day);
@@ -812,12 +812,12 @@ void display_daily_forecast(const daily_forecast_t* forecast)
             const char *day_label = d->fx_date[0] ? d->fx_date : "--/--";
 
             if (cols == 2) {
-                // 2-col: date + temp side-by-side
+                // 2-col: date + temp(below)
                 lv_obj_t *dl = lv_label_create(scr);
                 lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(dl, lv_palette_main(LV_PALETTE_GREY), 0);
                 lv_label_set_text(dl, day_label);
-                lv_obj_align(dl, LV_ALIGN_TOP_LEFT, col_cx - 24, cy );
+               lv_obj_align(dl, LV_ALIGN_TOP_LEFT, col_cx - 30, cy + 36);
 
                 lv_obj_t *tl_temp = lv_label_create(scr);
                 lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
@@ -825,22 +825,22 @@ void display_daily_forecast(const daily_forecast_t* forecast)
                 char buf[24];
                 snprintf(buf, sizeof(buf), "%d/%d", d->temp_min, d->temp_max);
                 lv_label_set_text(tl_temp, buf);
-                lv_obj_align(tl_temp, LV_ALIGN_TOP_LEFT, col_cx + 10, cy );
+               lv_obj_align(tl_temp, LV_ALIGN_TOP_LEFT, col_cx + 13, cy + 36);
             } else {
                 // 3-col: date above, temp below
                 lv_obj_t *dl = lv_label_create(scr);
                 lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(dl, lv_palette_main(LV_PALETTE_GREY), 0);
                 lv_label_set_text(dl, day_label);
-                lv_obj_set_pos(dl, col_cx - 20, cy + 36);
+               lv_obj_set_pos(dl, col_cx - 30, cy + 36);
 
                 lv_obj_t *tl_temp = lv_label_create(scr);
                 lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
                 char buf[24];
-                snprintf(buf, sizeof(buf), "%d/%d", d->temp_min, d->temp_max);
+                snprintf(buf, sizeof(buf), "%d-%d", d->temp_min, d->temp_max);
                 lv_label_set_text(tl_temp, buf);
-                lv_obj_set_pos(tl_temp, col_cx + 4, cy + 36);
+                lv_obj_set_pos(tl_temp, col_cx + 12, cy + 36);
             }
         }
     }
@@ -850,7 +850,7 @@ void display_daily_forecast(const daily_forecast_t* forecast)
     lv_obj_set_style_text_font(title, &lv_font_simsun_16_cjk, 0);
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_label_set_text(title, "十日");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 5);
 
     lvgl_port_unlock();
 }
@@ -1086,10 +1086,10 @@ static void colon_blink_timer_cb(lv_timer_t *timer)
     (void)timer;
     colon_visible = !colon_visible;
     if (objects.label_time) {
-        char buf[48];
+        char buf[32];
         const char *sep = colon_visible ? ":" : " ";
-        snprintf(buf, sizeof(buf), "%02d%s%02d  %s",
-                 last_hour, sep, last_minute, wday_name(last_wday));
+        snprintf(buf, sizeof(buf), "%02d%s%02d",
+                 last_hour, sep, last_minute);
         lv_label_set_text(objects.label_time, buf);
     }
 }
@@ -1144,8 +1144,8 @@ void display_main_screen(int hour, int minute, int wday,
 
     /* Time + colon blink timer */
     if (objects.label_time) {
-        /* Use simsun font so Chinese weekday (周一~周日) renders correctly */
-        lv_obj_set_style_text_font(objects.label_time, &lv_font_simsun_16_cjk, 0);
+        
+        lv_obj_set_style_text_font(objects.label_time, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(objects.label_time, lv_color_white(), 0);
 
         /* Always get time from system clock directly (like screensaver does).
@@ -1156,11 +1156,11 @@ void display_main_screen(int hour, int minute, int wday,
         struct tm *tm_now = localtime(&now);
         last_hour = tm_now->tm_hour;
         last_minute = tm_now->tm_min;
-        last_wday = tm_now->tm_wday;
+       
 
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%02d:%02d  %s",
-                 last_hour, last_minute, wday_name(last_wday));
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%02d:%02d",
+                 last_hour, last_minute);
         lv_label_set_text(objects.label_time, buf);
 
         if (colon_blink_timer) lv_timer_del(colon_blink_timer);
@@ -1169,14 +1169,16 @@ void display_main_screen(int hour, int minute, int wday,
 
     /* Date — always from system clock */
     if (objects.label_date) {
-        lv_obj_set_style_text_font(objects.label_date, &lv_font_montserrat_18, 0);
+        /* Use simsun font so Chinese weekday (周一~周日) renders correctly */
+        lv_obj_set_style_text_font(objects.label_date, &lv_font_simsun_16_cjk, 0);
         lv_obj_set_style_text_color(objects.label_date, lv_color_white(), 0);
         time_t now;
         time(&now);
         struct tm *tm_now = localtime(&now);
-        char date_buf[32];
-        snprintf(date_buf, sizeof(date_buf), "%d.%d.%d",
-                 tm_now->tm_year + 1900, tm_now->tm_mon + 1, tm_now->tm_mday);
+         last_wday = tm_now->tm_wday;
+        char date_buf[48];
+        snprintf(date_buf, sizeof(date_buf), "%d.%d.%d  %s",
+                 tm_now->tm_year + 1900, tm_now->tm_mon + 1, tm_now->tm_mday, wday_name(last_wday));
         lv_label_set_text(objects.label_date, date_buf);
     }
 

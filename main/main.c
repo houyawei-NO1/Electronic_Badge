@@ -708,7 +708,7 @@ void app_main(void)
         //   各数据按各自的保鲜期判断
         //   任意一项过期 → 连WiFi一次性全部刷新
         bool need_current = !s_has_weather ||
-                           ((now - (time_t)s_last_weather_update) > 3600);
+                           ((now - (time_t)s_last_weather_update) > 3600 * 3);
         bool need_hourly  = !s_has_hourly ||
                            ((now - (time_t)s_last_hourly_update) > HOURLY_FRESH_SECS);
         bool need_daily   = !s_has_daily ||
