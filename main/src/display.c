@@ -16,9 +16,7 @@
  *   and hand the lv_img_dsc_t pointer to LVGL.
  *
  *   Icon size: 48x48 (fits 51 icons in 512 KB SPIFFS partition.
- *   Night codes (150-153, 350-351, 456-457) share day icons (100-103,
- *   300-301, 406-407) via weather_code_to_bin_path() mapping — no separate
- *   bin files exist for night codes.
+ *  
  *
  *   Why not decode PNG at run-time?
  *   - LVGL's png decoder uses lv_mem_alloc/lv_mem_free (LVGL internal heap)
@@ -99,19 +97,7 @@ static int last_wday = -1;
  */
 static void weather_code_to_bin_path(int16_t code, char *buf, size_t buf_size)
 {
-    /* "夜间" code aliases to the 日间 icon for the same weather */
-    int16_t day_code = code;
-    switch (code) {
-        case 150: day_code = 100; break;
-        case 151: day_code = 101; break;
-        case 152: day_code = 102; break;
-        case 153: day_code = 103; break;
-        case 350: day_code = 300; break;
-        case 351: day_code = 301; break;
-        case 456: day_code = 406; break;
-        case 457: day_code = 407; break;
-    }
-    snprintf(buf, buf_size, "/spiffs/%d-fill.bin", day_code);
+    snprintf(buf, buf_size, "/spiffs/%d-fill.bin", code);
 }
 
 static esp_err_t init_spiffs(void)

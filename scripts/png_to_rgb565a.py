@@ -26,10 +26,6 @@ import struct
 # Icon size (must match what display.c expects)
 ICON_SIZE = 48
 
-# Night codes that map to day codes in weather_code_to_bin_path() in display.c
-# We skip these PNGs because display.c will never open them — it uses the
-# daytime variant instead (e.g. code 150 → path /spiffs/100-fill.bin).
-NIGHT_CODES = {150, 151, 152, 153, 350, 351, 456, 457}
 
 # SPIFFS partition size limit (see partitions.csv)
 SPIFFS_MAX_BYTES = 512 * 1024  # 512 KB
@@ -112,12 +108,6 @@ def main():
             print(f"  SKIP {fname} (not a weather code)")
             continue
 
-        # Skip night-code PNGs — display.c maps them to day codes
-        if code in NIGHT_CODES:
-            skipped += 1
-            print(f"  SKIP {fname} (night code, maps to day variant)")
-            continue
-
         png_path = os.path.join(input_dir, fname)
         bin_path = os.path.join(output_dir, base + ".bin")
         png_to_rgb565a(png_path, bin_path)
@@ -125,7 +115,7 @@ def main():
         count += 1
 
     print(f"\nConverted {count} PNG file(s) from {input_dir} → {output_dir}")
-    print(f"Skipped {skipped} file(s) (night codes / non-weather)")
+    print(f"Skipped {skipped} file(s) ( non-weather)")
     print(f"Total binary size: {total_bytes} bytes ({total_bytes/1024:.1f} KB)")
     print(f"SPIFFS limit:      {SPIFFS_MAX_BYTES} bytes ({SPIFFS_MAX_BYTES/1024:.0f} KB)")
     if total_bytes > SPIFFS_MAX_BYTES:
