@@ -514,6 +514,72 @@ static void label_breathe_anim_cb(void *var, int32_t v)
     lv_obj_set_style_text_opa(obj, (lv_opa_t)v, LV_PART_MAIN | LV_STATE_DEFAULT);
 }
 
+/* Per-widget rotation — lv_img_set_angle is per-widget (stored in lv_img_t, NOT the shared dsc) */
+static void icon_rotate_per_widget_cb(void *var, int32_t v)
+{
+    lv_img_set_angle((lv_obj_t *)var, v);
+}
+
+/* Relative offset callbacks — use style_translate, do NOT change base position */
+static void icon_translate_x_cb(void *var, int32_t v)
+{
+    lv_obj_set_style_translate_x((lv_obj_t *)var, v, 0);
+}
+
+static void icon_translate_y_cb(void *var, int32_t v)
+{
+    lv_obj_set_style_translate_y((lv_obj_t *)var, v, 0);
+}
+
+/**
+ * @brief Apply weather-icon motion animation to any icon object.
+ * Does NOT change the icon's base position — uses per-widget style transforms
+ * and lv_img_set_angle (which is per-widget, not shared dsc).
+ */
+static void apply_icon_animation(lv_obj_t *icon, int16_t weather_code)
+{
+    if (!icon) return;
+
+    lv_anim_del(icon, NULL);
+
+    int16_t code = weather_code;
+    if (code == 100 || code == 499) {
+        // Rotate — lv_img_set_angle is per-widget, independent of shared dsc
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, icon);
+        lv_anim_set_values(&a, 0, 3600);
+        lv_anim_set_time(&a, 6000);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_exec_cb(&a, icon_rotate_per_widget_cb);
+        lv_anim_start(&a);
+    } else if (code == 101 || code == 151 || code == 103 || code == 153 ||
+               (code >= 300 && code <= 318) || code == 399 ||
+               (code >= 400 && code <= 410) || code == 499) {
+        // Sway — relative translate_x (±2), base position unchanged
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, icon);
+        lv_anim_set_values(&a, -2, 2);
+        lv_anim_set_time(&a, 3000);
+        lv_anim_set_playback_time(&a, 3000);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_exec_cb(&a, icon_translate_x_cb);
+        lv_anim_start(&a);
+    } else {
+        // Float — relative translate_y (±2), base position unchanged
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, icon);
+        lv_anim_set_values(&a, -2, 2);
+        lv_anim_set_time(&a, 2000);
+        lv_anim_set_playback_time(&a, 2000);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_exec_cb(&a, icon_translate_y_cb);
+        lv_anim_start(&a);
+    }
+}
+
 static void arc_phase1_cb(void *var, int32_t v)
 {
     lv_obj_t *obj = (lv_obj_t *)var;
@@ -645,6 +711,9 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
             }
             lv_obj_set_pos(icon, col_cx - 20, cy + 2);
 
+            // Apply same motion animation as main screen
+            if (h->icon > 0) apply_icon_animation(icon, h->icon);
+
             if (cols == 2) {
                 // 2-col: time + temp side-by-side
                 lv_obj_t *tl = lv_label_create(scr);
@@ -736,6 +805,9 @@ void display_daily_forecast(const daily_forecast_t* forecast)
                 }
             }
             lv_obj_set_pos(icon, col_cx-50, cy + 2);
+
+            // Apply same motion animation as main screen
+            if (d->icon_day > 0) apply_icon_animation(icon, d->icon_day);
 
             const char *day_label = d->fx_date[0] ? d->fx_date : "--/--";
 
