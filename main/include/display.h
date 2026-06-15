@@ -109,7 +109,7 @@ void display_hourly_forecast(const hourly_forecast_t* forecast);
 
 /**
  * @brief Display daily forecast screen
- * Shows up to 7 daily forecasts in a 2+3+2 grid layout
+ * Shows up to 10 daily forecasts in a 2+3+3+2 grid layout
  * @param forecast Pointer to daily forecast data
  */
 void display_daily_forecast(const daily_forecast_t* forecast);

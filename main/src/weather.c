@@ -60,27 +60,45 @@ static bool gzip_decompress(const uint8_t* input, size_t input_len, char* output
     size_t in_rem = deflate_len;
     size_t out_rem = *output_len;
     uint8_t* out_next = (uint8_t*)output;
+    size_t total_written = 0;
 
-    // 使用TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF确保输出不循环
-    tinfl_status st = tinfl_decompress(
-        dec,
-        deflate_data, &in_rem,
-        (uint8_t*)output, out_next, &out_rem,
-        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF
-    );
+    // 循环解压直到完成
+    tinfl_status st;
+    do {
+        size_t in_bytes = in_rem;
+        size_t out_bytes = out_rem;
+        
+        st = tinfl_decompress(
+            dec,
+            deflate_data, &in_bytes,
+            (uint8_t*)output, out_next, &out_bytes,
+            TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | TINFL_FLAG_HAS_MORE_INPUT
+        );
+
+        // 更新指针和计数器
+        deflate_data += in_bytes;
+        in_rem -= in_bytes;
+        out_next += out_bytes;
+        out_rem -= out_bytes;
+        total_written += out_bytes;
+
+        // 如果输出缓冲区满了，停止解压
+        if (out_rem == 0) {
+            ESP_LOGW(TAG, "输出缓冲区已满，已解压 %d 字节", total_written);
+            break;
+        }
+    } while (st == TINFL_STATUS_NEEDS_MORE_INPUT);
 
     free(dec);
 
-    if (st < TINFL_STATUS_DONE) {
+    if (st != TINFL_STATUS_DONE && st != TINFL_STATUS_NEEDS_MORE_INPUT) {
         ESP_LOGE(TAG, "解压错误: %d", st);
         return false;
     }
 
-    // out_rem 是剩余空间，实际写入字节数 = 总大小 - 剩余空间
-    size_t written = *output_len - out_rem;
-    *output_len = written;
-    output[written] = '\0';
-    ESP_LOGD(TAG, "解压了 %d 字节", written);
+    *output_len = total_written;
+    output[total_written] = '\0';
+    ESP_LOGD(TAG, "解压了 %d 字节", total_written);
     return true;
 }
 
@@ -115,7 +133,7 @@ static const char* json_get_string(const char* json, const char* key, char* out,
 }
 
 typedef struct {
-    char raw_data[4096];
+    char raw_data[8192];  // 增大缓冲区以容纳10天预报的gzip压缩数据
     size_t raw_len;
     bool is_gzip;
 } http_response_t;
@@ -168,7 +186,7 @@ static const char* find_matching_brace(const char* start, const char* end_limit)
 
 // Static buffers to avoid stack overflow
 static http_response_t s_resp_info;
-static char s_response[8192];  // Must be large enough for the biggest JSON (~4400 bytes for 24h hourly)
+static char s_response[16384];  // 增大缓冲区以容纳10天预报的解压后JSON数据
 
 bool weather_fetch(weather_data_t* data)
 {
@@ -198,7 +216,7 @@ bool weather_fetch(weather_data_t* data)
         .timeout_ms = 10000,
         .skip_cert_common_name_check = true,  // Skip CN check for development
         .disable_auto_redirect = false,
-        .buffer_size = 8192,
+        .buffer_size = 16384,
         .buffer_size_tx = 1024,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -381,7 +399,7 @@ bool weather_fetch_hourly(hourly_forecast_t* forecast)
         .timeout_ms = 10000,
         .skip_cert_common_name_check = true,
         .disable_auto_redirect = false,
-        .buffer_size = 4096,
+        .buffer_size = 16384,
         .buffer_size_tx = 1024,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -462,7 +480,7 @@ bool weather_fetch_hourly(hourly_forecast_t* forecast)
 }
 
 /* =========================================================================
- * Daily forecast (7d endpoint)
+ * Daily forecast (10d endpoint)
  * ========================================================================= */
 bool weather_fetch_daily(daily_forecast_t* forecast)
 {
@@ -485,7 +503,7 @@ bool weather_fetch_daily(daily_forecast_t* forecast)
         .timeout_ms = 10000,
         .skip_cert_common_name_check = true,
         .disable_auto_redirect = false,
-        .buffer_size = 4096,
+        .buffer_size = 16384,
         .buffer_size_tx = 1024,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,

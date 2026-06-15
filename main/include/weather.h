@@ -68,7 +68,7 @@ bool weather_fetch(weather_data_t* data);
 bool weather_fetch_hourly(hourly_forecast_t* forecast);
 
 /**
- * @brief Fetch daily forecast (7d/10d endpoint)
+ * @brief Fetch daily forecast (10d endpoint)
  * @param forecast Pointer to daily forecast structure to fill
  * @return true if successful
  */

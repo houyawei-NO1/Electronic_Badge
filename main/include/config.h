@@ -111,7 +111,7 @@
 // =============================================================================
 #define NTP_SERVER_1       "ntp.aliyun.com"
 #define NTP_SERVER_2       "time.pool.aliyun.com"
-// Note: Timezone is set in code using setenv("TZ", "Asia/Shanghai", 1)
+// Note: Timezone is set in code using setenv("TZ", "CST-8", 1)
 
 // =============================================================================
 // RTC Memory (persist across deep sleep)

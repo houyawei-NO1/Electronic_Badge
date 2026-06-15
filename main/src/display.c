@@ -15,7 +15,7 @@
  *   <code>-fill.bin. At run-time we simply fread() into a malloc'd buffer
  *   and hand the lv_img_dsc_t pointer to LVGL.
  *
- *   Icon size: 48x48 (fits 51 icons in 512 KB SPIFFS partition.
+ *   Icon size: 48x48 (fits 51 icons in 512 KB SPIFFS partition).
  *  
  *
  *   Why not decode PNG at run-time?
@@ -731,8 +731,8 @@ void display_loading_status(const char *status)
  * =========================================================================
  *
  * Creates up to 10 forecast items in a 2+3+3+2 grid.
- * 2-col rows: icon → time(above) + temp(below)
- * 3-col rows: icon → time(above) + temp(below) */
+ * 2-col rows: icon → time(left) + temp(right) side-by-side
+ * 3-col rows: icon → time(left) + temp(right) side-by-side */
 void display_hourly_forecast(const hourly_forecast_t* forecast)
 {
     if (!is_initialized || !disp_handle || !forecast) return;
@@ -826,8 +826,8 @@ void display_hourly_forecast(const hourly_forecast_t* forecast)
  * =========================================================================
  *
  * Creates up to 10 forecast days in a 2+3+3+2 grid.
- * 2-col rows: icon → date(above) +temp(below)
- * 3-col rows: icon → date(above) + temp(below) */
+ * 2-col rows: icon → date(left) + temp(right) side-by-side
+ * 3-col rows: icon → date(left) + temp(right) side-by-side */
 void display_daily_forecast(const daily_forecast_t* forecast)
 {
     if (!is_initialized || !disp_handle || !forecast) return;

@@ -688,16 +688,19 @@ void app_main(void)
         // 天气和预报数据是否需要更新：
         //   各数据按各自的保鲜期判断
         //   任意一项过期 → 连WiFi一次性全部刷新
-        bool need_current = !s_has_weather ||
+        //   刚上电时如果系统时间无效（年份<2020），必须强制更新来同步时间
+        bool time_valid = system_time_valid();
+        bool need_current = !s_has_weather || !time_valid ||
                            ((now - (time_t)s_last_weather_update) > 3600 * 3);
-        bool need_hourly  = !s_has_hourly ||
+        bool need_hourly  = !s_has_hourly || !time_valid ||
                            ((now - (time_t)s_last_hourly_update) > HOURLY_FRESH_SECS);
-        bool need_daily   = !s_has_daily ||
+        bool need_daily   = !s_has_daily || !time_valid ||
                            ((now - (time_t)s_last_daily_update)  > DAILY_FRESH_SECS);
         bool need_update  = need_current || need_hourly || need_daily;
 
         ESP_LOGI(TAG, "--- 主循环 #%lu ---", s_boot_count);
-        ESP_LOGI(TAG, "新鲜度: 当前%s(%lds前) 小时%s(%lds前) 每日%s(%lds前) 需更新=%s",
+        ESP_LOGI(TAG, "系统时间: %s, 新鲜度: 当前%s(%lds前) 小时%s(%lds前) 每日%s(%lds前) 需更新=%s",
+                 time_valid ? "有效" : "无效",
                  s_has_weather ? "OK" : "无",
                  s_has_weather ? (long)(now - (time_t)s_last_weather_update) : -1,
                  s_has_hourly ? "OK" : "无",
