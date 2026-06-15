@@ -175,6 +175,8 @@ bool wifi_connect(void)
             ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
             ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
             ESP_ERROR_CHECK(esp_wifi_start());
+            // 显式调用 esp_wifi_connect() 确保连接启动
+            esp_wifi_connect();
             
             ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
             EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
