@@ -22,6 +22,7 @@ static const int CONNECTED_BIT = BIT0;
 static const int WIFI_FAIL_BIT = BIT1;
 static int s_retry_num = 0;
 static const char *TAG_WIFI = "WiFi";
+static char s_connected_ssid[33] = {0};
 
 // Default configs stored in flash
 static wifi_manager_config_t s_configs[WIFI_MAX_CONFIGS];
@@ -42,8 +43,13 @@ void wifi_manager_init(void)
 
 bool wifi_connect(void)
 {
+    /* Double-check: s_wifi_status may be stale if disconnect event was missed */
     if (s_wifi_status == WIFI_STATUS_CONNECTED) {
-        return true;
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            return true;
+        }
+        s_wifi_status = WIFI_STATUS_DISCONNECTED;
     }
     
     s_wifi_status = WIFI_STATUS_CONNECTING;
@@ -118,7 +124,8 @@ bool wifi_connect(void)
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
         ESP_ERROR_CHECK(esp_wifi_start());
-
+        // 显式调用 esp_wifi_connect() 确保连接启动
+        esp_wifi_connect();
         ESP_LOGI(TAG_WIFI, "等待连接... (超时: %d 毫秒)", WIFI_CONNECT_TIMEOUT_MS);
         EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                                CONNECTED_BIT | WIFI_FAIL_BIT,
@@ -214,6 +221,11 @@ wifi_status_t wifi_get_status(void)
 bool wifi_is_connected(void)
 {
     return s_wifi_status == WIFI_STATUS_CONNECTED;
+}
+
+const char* wifi_get_connected_ssid(void)
+{
+    return (s_wifi_status == WIFI_STATUS_CONNECTED && s_connected_ssid[0]) ? s_connected_ssid : NULL;
 }
 
 bool wifi_save_config(const char* ssid, const char* password)
@@ -464,13 +476,18 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base,
                             ESP_LOGW(TAG_WIFI, "达到最大重试次数，连接失败");
                             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
                             s_wifi_status = WIFI_STATUS_DISCONNECTED;
+                            s_connected_ssid[0] = '\0';
                         }
                     }
                 }
                 break;
-            case WIFI_EVENT_STA_CONNECTED:
-                ESP_LOGI(TAG_WIFI, "已连接到AP，等待IP...");
+            case WIFI_EVENT_STA_CONNECTED: {
+                wifi_event_sta_connected_t* evt = (wifi_event_sta_connected_t*)event_data;
+                strncpy(s_connected_ssid, (const char*)evt->ssid, sizeof(s_connected_ssid) - 1);
+                s_connected_ssid[sizeof(s_connected_ssid) - 1] = '\0';
+                ESP_LOGI(TAG_WIFI, "已连接到AP: %s，等待IP...", s_connected_ssid);
                 break;
+            }
             default:
                 break;
         }

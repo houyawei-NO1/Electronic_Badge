@@ -83,6 +83,13 @@ esp_err_t display_prepare_weather_icon(int16_t weather_code);
 void display_loading_status(const char* status);
 
 /**
+ * @brief Stop all LVGL animations to free memory for SSL/TLS operations.
+ *        This is critical before making HTTPS requests to avoid
+ *        mbedtls_ssl_setup error -0x7F00 (memory allocation failure).
+ */
+void display_stop_animations(void);
+
+/**
  * @brief Display WiFi config mode screen
  */
 void display_config_mode(void);

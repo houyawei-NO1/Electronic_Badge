@@ -55,6 +55,12 @@ wifi_status_t wifi_get_status(void);
 bool wifi_is_connected(void);
 
 /**
+ * @brief Get the SSID of the currently connected AP
+ * @return SSID string, or NULL if not connected
+ */
+const char* wifi_get_connected_ssid(void);
+
+/**
  * @brief Save WiFi configuration to NVS
  * @param ssid SSID string
  * @param password Password string

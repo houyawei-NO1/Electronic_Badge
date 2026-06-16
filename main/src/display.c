@@ -56,6 +56,7 @@
 #include "lvgl.h"
 #include "ui.h"
 #include "esp_spiffs.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "显示";
 
@@ -73,6 +74,16 @@ static cached_icon_t cached_weather_icon;
 static bool is_initialized = false;
 static lv_img_dsc_t s_forecast_icon_descs[10];
 static uint8_t *s_forecast_icon_pixels[10] = {0};
+
+/* Background image state for screensaver */
+typedef struct {
+    uint8_t *pixel_buf;     /* malloc'd buffer: [2B width][2B height][w*h*2B pixels] */
+    lv_img_dsc_t dsc;       /* LVGL descriptor; dsc.data points into pixel_buf */
+    int current_index;      /* current background image index (0-based) */
+    int total_count;        /* total number of background images available */
+} cached_bg_t;
+
+static cached_bg_t cached_bg_image;
 
 bool display_is_initialized(void)
 {
@@ -100,6 +111,39 @@ static int last_wday = -1;
 static void weather_code_to_bin_path(int16_t code, char *buf, size_t buf_size)
 {
     snprintf(buf, buf_size, "/spiffs/%d-fill.bin", code);
+}
+
+/**
+ * @brief Map a background image index → SPIFFS path of the pre-decoded
+ *        RGB565 binary file.
+ *        Background images are named bg_1.bin, bg_2.bin, etc.
+ */
+static void bg_index_to_bin_path(int index, char *buf, size_t buf_size)
+{
+    snprintf(buf, buf_size, "/spiffs/bg_%d.bin", index + 1);
+}
+
+/**
+ * @brief Count how many background images are available in SPIFFS.
+ *        Scans for files named bg_1.bin, bg_2.bin, etc.
+ */
+static int count_background_images(void)
+{
+    int count = 0;
+    char path[64];
+    
+    for (int i = 1; i <= 20; i++) {  /* Max 20 background images */
+        snprintf(path, sizeof(path), "/spiffs/bg_%d.bin", i);
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            fclose(f);
+            count++;
+        } else {
+            break;  /* Stop at first missing file */
+        }
+    }
+    
+    return count;
 }
 
 static esp_err_t init_spiffs(void)
@@ -275,6 +319,108 @@ esp_err_t display_prepare_weather_icon(int16_t weather_code)
     ESP_LOGI(TAG, "[图标] 已加载: %s (%ux%u, cf=TRUE_COLOR_ALPHA, %u bytes)",
              path, (unsigned)w, (unsigned)h, (unsigned)total_bytes);
     return ESP_OK;
+}
+
+/* =========================================================================
+ * Background image loader — fread() the pre-converted RGB565 binary
+ * =========================================================================
+ *
+ * Similar to weather icon loader, but for full-screen background images
+ * without alpha channel. Binary format:
+ *   Bytes 0-1: width (uint16 LE)
+ *   Bytes 2-3: height (uint16 LE)
+ *   Bytes 4+: w * h * 2 bytes — RGB565 pixels
+ * ========================================================================= */
+static esp_err_t load_background_image(int index)
+{
+    /* Drop the old buffer before allocating a new one */
+    if (cached_bg_image.pixel_buf) {
+        free(cached_bg_image.pixel_buf);
+    }
+    memset(&cached_bg_image, 0, sizeof(cached_bg_image));
+
+    char path[64];
+    bg_index_to_bin_path(index, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "[背景图] 二进制文件不存在: %s", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    /* --- Read 4-byte header: width (uint16 LE), height (uint16 LE) --- */
+    uint8_t hdr[4];
+    size_t nr = fread(hdr, 1, sizeof(hdr), f);
+    if (nr != sizeof(hdr)) {
+        ESP_LOGE(TAG, "[背景图] 读 header 失败: %s", path);
+        fclose(f);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint16_t w = (uint16_t)((uint16_t)hdr[1] << 8 | hdr[0]);
+    uint16_t h = (uint16_t)((uint16_t)hdr[3] << 8 | hdr[2]);
+    uint32_t pixel_bytes = (uint32_t)w * (uint32_t)h * 2U;  /* RGB565 only */
+    uint32_t total_bytes = 4U + pixel_bytes;
+
+    /* --- Allocate one contiguous buffer for header + pixels ---
+     * 120x120 RGB565 = ~28.8KB. If malloc fails, gracefully skip the background. */
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(total_bytes, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        buf = (uint8_t *)heap_caps_malloc(total_bytes, MALLOC_CAP_8BIT);
+    }
+    if (!buf) {
+        ESP_LOGE(TAG, "[背景图] malloc 失败 (%u bytes), 可用堆内存不足", (unsigned)total_bytes);
+        ESP_LOGI(TAG, "[背景图] 可用堆: %d bytes, 最大块: %d bytes",
+                 (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+    buf[0] = hdr[0]; buf[1] = hdr[1];
+    buf[2] = hdr[2]; buf[3] = hdr[3];
+
+    nr = fread(buf + 4, 1, pixel_bytes, f);
+    fclose(f);
+    if (nr != pixel_bytes) {
+        ESP_LOGE(TAG, "[背景图] 像素数据不完整: %s (got %zu, want %u)",
+                 path, nr, (unsigned)pixel_bytes);
+        heap_caps_free(buf);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* --- Populate lv_img_dsc_t (point into buf + 4) --- */
+    cached_bg_image.pixel_buf = buf;
+    cached_bg_image.dsc.header.always_zero = 0;
+    cached_bg_image.dsc.header.w = w;
+    cached_bg_image.dsc.header.h = h;
+    cached_bg_image.dsc.header.cf = LV_IMG_CF_TRUE_COLOR;  /* 2 bytes/pixel, big-endian for SWAP */
+    cached_bg_image.dsc.data_size = pixel_bytes;
+    cached_bg_image.dsc.data = buf + 4;
+    cached_bg_image.current_index = index;
+
+    ESP_LOGI(TAG, "[背景图] 已加载: %s (%ux%u, cf=TRUE_COLOR, %u bytes)",
+             path, (unsigned)w, (unsigned)h, (unsigned)total_bytes);
+    return ESP_OK;
+}
+
+/**
+ * @brief Load the next background image (cycle through available images).
+ *        Called each time screensaver is displayed.
+ */
+static esp_err_t load_next_background_image(void)
+{
+    /* First time: count available images */
+    if (cached_bg_image.total_count == 0) {
+        cached_bg_image.total_count = count_background_images();
+        if (cached_bg_image.total_count == 0) {
+            ESP_LOGW(TAG, "[背景图] SPIFFS中没有背景图文件");
+            return ESP_ERR_NOT_FOUND;
+        }
+        ESP_LOGI(TAG, "[背景图] 发现 %d 张背景图", cached_bg_image.total_count);
+    }
+
+    /* Load next image in cycle */
+    int next_index = (cached_bg_image.current_index + 1) % cached_bg_image.total_count;
+    return load_background_image(next_index);
 }
 
 /* =========================================================================
@@ -459,8 +605,22 @@ esp_err_t display_init(void)
      *  - display_main_screen() 写入真实数据后会触发首次 lv_scr_load,
      *    LVGL 会在下次 lv_task_handler 中自动刷新, 上电不会再闪默认值 */
 
+    /* 加载 loading 屏幕作为初始画面，避免上电黑屏 */
+    lvgl_port_lock(0);
+    loadScreen(SCREEN_ID_BADGE_LOADING);
+    lv_obj_t *act = lv_disp_get_scr_act(disp_handle);
+    lv_obj_set_style_bg_color(act, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(act, LV_OPA_COVER, 0);
+    if (objects.label_1) {
+        lv_obj_set_style_text_font(objects.label_1, &lv_font_simsun_16_cjk, 0);
+        lv_obj_set_style_text_color(objects.label_1, lv_color_white(), 0);
+        lv_obj_set_style_text_opa(objects.label_1, LV_OPA_COVER, 0);
+        lv_label_set_text(objects.label_1, "启动中...");
+    }
+    lvgl_port_unlock();
+
     is_initialized = true;
-    ESP_LOGI(TAG, "显示初始化成功 (延迟加载屏幕, 待真实时间/天气写入)");
+    ESP_LOGI(TAG, "显示初始化成功 (加载界面已显示)");
     return ESP_OK;
 }
 
@@ -544,6 +704,14 @@ void display_deinit(void)
         cached_weather_icon.pixel_buf = NULL;
     }
     memset(&cached_weather_icon, 0, sizeof(cached_weather_icon));
+    
+    /* Clean up background image cache */
+    if (cached_bg_image.pixel_buf) {
+        heap_caps_free(cached_bg_image.pixel_buf);
+        cached_bg_image.pixel_buf = NULL;
+    }
+    memset(&cached_bg_image, 0, sizeof(cached_bg_image));
+    
     esp_vfs_spiffs_unregister("spiffs");
 
     is_initialized = false;
@@ -694,16 +862,17 @@ void display_loading(const char *message)
         if (message) lv_label_set_text(objects.label_1, message);
     }
 
-    /* Two-phase arc: fill 0→360°, then spin a 60° slice forever */
+    /* Fixed 60° arc spinning forever (no fill phase) */
     if (objects.arc_1) {
+        lv_arc_set_start_angle(objects.arc_1, 0);
+        lv_arc_set_end_angle(objects.arc_1, 60);
         lv_anim_t a;
         lv_anim_init(&a);
         lv_anim_set_var(&a, objects.arc_1);
         lv_anim_set_values(&a, 0, 360);
         lv_anim_set_time(&a, 3000);
-        lv_anim_set_repeat_count(&a, 0);
-        lv_anim_set_exec_cb(&a, arc_phase1_cb);
-        lv_anim_set_ready_cb(&a, arc_phase1_ready_cb);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_exec_cb(&a, arc_phase2_cb);
         lv_anim_start(&a);
     }
     lvgl_port_unlock();
@@ -723,6 +892,20 @@ void display_loading_status(const char *status)
                                   LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_label_set_text(objects.label_1, status);
     }
+    lvgl_port_unlock();
+}
+
+/**
+ * @brief Stop all LVGL animations to free memory for SSL/TLS operations.
+ *        This is critical before making HTTPS requests to avoid
+ *        mbedtls_ssl_setup error -0x7F00 (memory allocation failure).
+ */
+void display_stop_animations(void)
+{
+    if (!is_initialized || !disp_handle) return;
+
+    lvgl_port_lock(0);
+    lv_anim_del(NULL, NULL);
     lvgl_port_unlock();
 }
 
@@ -872,7 +1055,7 @@ void display_daily_forecast(const daily_forecast_t* forecast)
             // Apply same motion animation as main screen
             if (d->icon_day > 0) apply_icon_animation(icon, d->icon_day);
 
-            const char *day_label = d->fx_date[0] ? d->fx_date : "--/--";
+            const char *day_label = d->fx_date[0] ? d->fx_date : "--";
 
             if (cols == 2) {
                 // 2-col: date + temp(below)
@@ -880,30 +1063,30 @@ void display_daily_forecast(const daily_forecast_t* forecast)
                 lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(dl, lv_palette_main(LV_PALETTE_GREY), 0);
                 lv_label_set_text(dl, day_label);
-               lv_obj_align(dl, LV_ALIGN_TOP_LEFT, col_cx - 30, cy + 36);
+               lv_obj_align(dl, LV_ALIGN_TOP_LEFT, col_cx - 28, cy + 36);
 
                 lv_obj_t *tl_temp = lv_label_create(scr);
                 lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
                 char buf[24];
-                snprintf(buf, sizeof(buf), "%d/%d", d->temp_min, d->temp_max);
+                snprintf(buf, sizeof(buf), "%d°/%d°", d->temp_min, d->temp_max);
                 lv_label_set_text(tl_temp, buf);
-               lv_obj_align(tl_temp, LV_ALIGN_TOP_LEFT, col_cx + 13, cy + 36);
+               lv_obj_align(tl_temp, LV_ALIGN_TOP_LEFT, col_cx - 10, cy + 36);
             } else {
                 // 3-col: date above, temp below
                 lv_obj_t *dl = lv_label_create(scr);
                 lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(dl, lv_palette_main(LV_PALETTE_GREY), 0);
                 lv_label_set_text(dl, day_label);
-               lv_obj_set_pos(dl, col_cx - 30, cy + 36);
+               lv_obj_set_pos(dl, col_cx - 28, cy + 36);
 
                 lv_obj_t *tl_temp = lv_label_create(scr);
                 lv_obj_set_style_text_font(tl_temp, &lv_font_montserrat_14, 0);
                 lv_obj_set_style_text_color(tl_temp, lv_color_white(), 0);
                 char buf[24];
-                snprintf(buf, sizeof(buf), "%d/%d", d->temp_min, d->temp_max);
+                snprintf(buf, sizeof(buf), "%d°/%d°", d->temp_min, d->temp_max);
                 lv_label_set_text(tl_temp, buf);
-                lv_obj_set_pos(tl_temp, col_cx + 12, cy + 36);
+                lv_obj_set_pos(tl_temp, col_cx - 10, cy + 36);
             }
         }
     }
@@ -971,6 +1154,9 @@ void display_screensaver(int hour, int minute)
 {
     if (!is_initialized || !disp_handle) return;
 
+    /* Load next background image BEFORE entering LVGL lock (fread + malloc, no LVGL calls) */
+    esp_err_t bg_ret = load_next_background_image();
+
     lvgl_port_lock(0);
 
     // Kill all pending animations
@@ -1009,6 +1195,18 @@ void display_screensaver(int hour, int minute)
     lv_obj_set_style_border_width(screensaver_overlay, 0, 0);
     lv_obj_set_style_pad_all(screensaver_overlay, 0, 0);
     lv_obj_clear_flag(screensaver_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* --- Background image (if loaded successfully) ---
+     * Background images are 120x120 RGB565 (~29KB). LVGL zoom=512 scales to 240x240.
+     * Use LV_ALIGN_CENTER so zoom grows from the center, not top-left. */
+    if (bg_ret == ESP_OK && cached_bg_image.pixel_buf) {
+        lv_obj_t *bg_img = lv_img_create(screensaver_overlay);
+        lv_img_set_src(bg_img, &cached_bg_image.dsc);
+        lv_obj_align(bg_img, LV_ALIGN_CENTER, 0, 0);
+        lv_img_set_zoom(bg_img, 512);  /* 120x120 * 2 = 240x240 */
+        ESP_LOGI(TAG, "[背景图] 显示 zoom=512 (原图%dx%d)",
+                 cached_bg_image.dsc.header.w, cached_bg_image.dsc.header.h);
+    }
 
     // Big clock centered
     lv_obj_t *label_clock = lv_label_create(screensaver_overlay);
@@ -1245,7 +1443,7 @@ void display_main_screen(int hour, int minute, int wday,
         lv_label_set_text(objects.label_date, date_buf);
     }
 
-    /* Weather icon */
+    /* Weather icon — center horizontally on 240px screen */
     if (objects.qweather_icons) {
         if (cached_weather_icon.valid) {
             lv_img_set_src(objects.qweather_icons, &cached_weather_icon.dsc);
@@ -1336,21 +1534,21 @@ void display_main_screen(int hour, int minute, int wday,
             lv_anim_t a;
             lv_anim_init(&a);
             lv_anim_set_var(&a, objects.qweather_icons);
-            lv_anim_set_values(&a, 78, 82);
+            lv_anim_set_values(&a, -2, 2);
             lv_anim_set_time(&a, 3000);
             lv_anim_set_playback_time(&a, 3000);
             lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-            lv_anim_set_exec_cb(&a, icon_sway_anim_cb);
+            lv_anim_set_exec_cb(&a, icon_translate_x_cb);
             lv_anim_start(&a);
         } else {
             lv_anim_t a;
             lv_anim_init(&a);
             lv_anim_set_var(&a, objects.qweather_icons);
-            lv_anim_set_values(&a, 70, 74);
+            lv_anim_set_values(&a, -2, 2);
             lv_anim_set_time(&a, 2000);
             lv_anim_set_playback_time(&a, 2000);
             lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-            lv_anim_set_exec_cb(&a, icon_float_anim_cb);
+            lv_anim_set_exec_cb(&a, icon_translate_y_cb);
             lv_anim_start(&a);
         }
     }

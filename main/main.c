@@ -421,95 +421,81 @@ static bool enter_update_mode(bool show_loading_ui)
     }
     display_backlight_on();
 
-    if (show_loading_ui) {
-        display_loading("正在配置WIF");
-    }
+    // Always show loading screen during update (not just when show_loading_ui=true)
+    display_loading("WiFi_INIT");
 
     // Connect to WiFi
-    if (show_loading_ui) {
-        display_loading_status("正在配置WIF");
-    }
+    display_loading_status("接入WiFi");
     if (!wifi_connect()) {
         ESP_LOGW(TAG, "WiFi连接失败");
-        if (show_loading_ui) {
-            display_loading("WiFi ERROR");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
+        display_loading("WiFi ERROR");
+        vTaskDelay(pdMS_TO_TICKS(1000));
         return false;
+    }
+
+    // Show connected SSID if available
+    const char *ssid = wifi_get_connected_ssid();
+    if (ssid) {
+        char ssid_status[64];
+        snprintf(ssid_status, sizeof(ssid_status), "接入%s", ssid);
+        display_loading_status(ssid_status);
     }
 
     // Sync time
-    if (show_loading_ui) {
-        display_loading_status("正在同步");
-    }
+    display_loading_status("同步NTP");
     sync_time();
 
-    // Show main screen with cached data first only for manual refresh
-    if (show_loading_ui) {
-        time_t now;
-        time(&now);
-        struct tm* tm_info = localtime(&now);
-        char update_str[32];
-        format_update_time(update_str, sizeof(update_str), s_last_weather_update);
-        display_main_screen(
-            tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
-            s_has_weather ? s_weather_data.weather_code : 100,
-            s_has_weather ? s_weather_data.weather_text : "晴",
-            s_has_weather ? s_weather_data.temperature : 25,
-            s_has_weather ? s_weather_data.humidity : 0,
-            s_has_weather ? s_weather_data.wind_scale : 0,
-            update_str);
-    }
+    // Stop LVGL animations before HTTPS request to free memory for SSL/TLS
+    // This fixes mbedtls_ssl_setup error -0x7F00 (memory allocation failure)
+    extern void display_stop_animations(void);
+    display_stop_animations();
 
-    // Fetch weather
+    // Fetch current weather first (show main screen ASAP)
+    display_loading_status("更新天气");
     memset(&s_weather_data, 0, sizeof(s_weather_data));
-    if (weather_fetch(&s_weather_data)) {
-        // Fix system time if needed
-        if (!system_time_valid() && s_weather_data.update_time > 1577836800UL) {
-            set_system_time_from_epoch(s_weather_data.update_time);
-        }
-
-        s_has_weather = true;
-        s_last_weather_update = s_weather_data.update_time;
-
-        // Save to NVS so data persists across reboots/wakeups
-        weather_save_to_nvs(&s_weather_data);
-
-        // Refresh screen with new data only for manual refresh
-        if (show_loading_ui) {
-            time_t now;
-            time(&now);
-            struct tm* tm_info = localtime(&now);
-            char update_str[32];
-            format_update_time(update_str, sizeof(update_str), s_last_weather_update);
-            display_main_screen(
-                tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
-                s_weather_data.weather_code, s_weather_data.weather_text,
-                s_weather_data.temperature, s_weather_data.humidity,
-                s_weather_data.wind_scale, update_str);
-        }
-
-        ESP_LOGI(TAG, "天气更新成功: code=%d temp=%d",
-                 s_weather_data.weather_code, s_weather_data.temperature);
-
-        // Fetch hourly and daily forecast data (best-effort, WiFi still up)
-        time_t fetch_now = time(NULL);
-        if (weather_fetch_hourly(&s_hourly_forecast)) {
-            s_has_hourly = true;
-            s_last_hourly_update = (uint32_t)fetch_now;
-            weather_save_hourly_to_nvs(&s_hourly_forecast);
-        }
-        if (weather_fetch_daily(&s_daily_forecast)) {
-            s_has_daily = true;
-            s_last_daily_update = (uint32_t)fetch_now;
-            weather_save_daily_to_nvs(&s_daily_forecast);
-        }
-
-        return true;
-    } else {
+    if (!weather_fetch(&s_weather_data)) {
         ESP_LOGW(TAG, "天气获取失败");
         return false;
     }
+
+    // Fix system time if needed
+    if (!system_time_valid() && s_weather_data.update_time > 1577836800UL) {
+        set_system_time_from_epoch(s_weather_data.update_time);
+    }
+
+    s_has_weather = true;
+    s_last_weather_update = s_weather_data.update_time;
+    weather_save_to_nvs(&s_weather_data);
+
+    ESP_LOGI(TAG, "天气更新成功: code=%d temp=%d",
+             s_weather_data.weather_code, s_weather_data.temperature);
+
+    // Show main screen immediately with current weather
+    time_t now;
+    time(&now);
+    struct tm* tm_info = localtime(&now);
+    char update_str[32];
+    format_update_time(update_str, sizeof(update_str), s_last_weather_update);
+    display_main_screen(
+        tm_info->tm_hour, tm_info->tm_min, tm_info->tm_wday,
+        s_weather_data.weather_code, s_weather_data.weather_text,
+        s_weather_data.temperature, s_weather_data.humidity,
+        s_weather_data.wind_scale, update_str);
+
+    // Fetch hourly and daily forecast in background (after main screen is shown)
+    time_t fetch_now = time(NULL);
+    if (weather_fetch_hourly(&s_hourly_forecast)) {
+        s_has_hourly = true;
+        s_last_hourly_update = (uint32_t)fetch_now;
+        weather_save_hourly_to_nvs(&s_hourly_forecast);
+    }
+    if (weather_fetch_daily(&s_daily_forecast)) {
+        s_has_daily = true;
+        s_last_daily_update = (uint32_t)fetch_now;
+        weather_save_daily_to_nvs(&s_daily_forecast);
+    }
+
+    return true;
 }
 
 // =============================================================================
@@ -691,7 +677,7 @@ void app_main(void)
         //   刚上电时如果系统时间无效（年份<2020），必须强制更新来同步时间
         bool time_valid = system_time_valid();
         bool need_current = !s_has_weather || !time_valid ||
-                           ((now - (time_t)s_last_weather_update) > 3600 * 3);
+                           ((now - (time_t)s_last_weather_update) > 3600 * 6);
         bool need_hourly  = !s_has_hourly || !time_valid ||
                            ((now - (time_t)s_last_hourly_update) > HOURLY_FRESH_SECS);
         bool need_daily   = !s_has_daily || !time_valid ||
@@ -711,7 +697,7 @@ void app_main(void)
 
         if (need_update) {
             ESP_LOGI(TAG, "天气数据过期或缺失，进入更新模式");
-            if (enter_update_mode(false)) {
+            if (enter_update_mode(true)) {
                 ESP_LOGI(TAG, "天气更新成功，进入显示模式");
             } else {
                 ESP_LOGW(TAG, "天气更新失败，使用缓存数据进入显示模式");

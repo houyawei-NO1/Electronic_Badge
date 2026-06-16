@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-天气图标 PNG 文件烧录脚本
-将 PNG 图标打包成 SPIFFS 镜像并烧录到 ESP32
+天气图标和背景图 PNG/JPG 文件烧录脚本
+将图标和背景图打包成 SPIFFS 镜像并烧录到 ESP32
 
 用法:
     python flash_icons.py --port COM3
 
 要求:
+    - 安装 Pillow (pip install Pillow)
     - 安装 mkspiffs 工具 (pip install mkspiffs 或从 https://github.com/igrr/mkspiffs 下载)
     - 安装 esptool (pip install esptool)
 """
@@ -18,11 +19,53 @@ import argparse
 import shutil
 
 # 配置
+SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
 ICONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main", "resources", "icons")
+BG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main", "resources", "jpg")
 SPIFFS_SIZE = 0x80000  # 512KB
 SPIFFS_BASE_ADDR = 0x380000  # 分区表中的偏移地址
 SPIFFS_BLOCK_SIZE = 4096
 SPIFFS_PAGE_SIZE = 256
+
+
+def convert_png_to_bin():
+    """将PNG图标转换为RGB565+alpha二进制格式"""
+    png_to_rgb565a = os.path.join(SCRIPTS_DIR, "png_to_rgb565a.py")
+    if not os.path.exists(png_to_rgb565a):
+        print(f"错误: 找不到转换脚本: {png_to_rgb565a}")
+        return False
+    
+    # 创建临时输出目录
+    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build", "spiffs_temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # 转换PNG图标
+    cmd = [sys.executable, png_to_rgb565a, ICONS_DIR, temp_dir]
+    print(f"\n转换PNG图标: {ICONS_DIR} -> {temp_dir}")
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("错误: PNG图标转换失败")
+        return False
+    
+    return temp_dir
+
+
+def convert_jpg_to_bin(output_dir):
+    """将JPG背景图转换为RGB565二进制格式"""
+    jpg_to_rgb565 = os.path.join(SCRIPTS_DIR, "jpg_to_rgb565.py")
+    if not os.path.exists(jpg_to_rgb565):
+        print(f"错误: 找不到转换脚本: {jpg_to_rgb565}")
+        return False
+    
+    # 转换JPG背景图
+    cmd = [sys.executable, jpg_to_rgb565, BG_DIR, output_dir]
+    print(f"\n转换JPG背景图: {BG_DIR} -> {output_dir}")
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("错误: JPG背景图转换失败")
+        return False
+    
+    return True
 
 
 def find_mkspiffs():
@@ -101,9 +144,10 @@ def flash_spiffs(port, image_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="烧录天气图标到 ESP32 SPIFFS")
+    parser = argparse.ArgumentParser(description="烧录天气图标和背景图到 ESP32 SPIFFS")
     parser.add_argument("--port", default="COM3", help="ESP32 串口 (默认: COM3)")
     parser.add_argument("--icons-dir", default=ICONS_DIR, help="图标目录")
+    parser.add_argument("--bg-dir", default=BG_DIR, help="背景图目录")
     parser.add_argument("--only-pack", action="store_true", help="只打包，不烧录")
     args = parser.parse_args()
 
@@ -123,13 +167,39 @@ def main():
         size = os.path.getsize(os.path.join(args.icons_dir, f))
         print(f"  {f} ({size // 1024}KB)")
 
-    # 创建临时镜像文件
-    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
+    # 检查背景图目录
+    if os.path.exists(args.bg_dir):
+        jpg_files = [f for f in os.listdir(args.bg_dir) if f.lower().endswith(('.jpg', '.jpeg'))]
+        if jpg_files:
+            print(f"\n找到 {len(jpg_files)} 个 JPG 背景图:")
+            for f in sorted(jpg_files):
+                size = os.path.getsize(os.path.join(args.bg_dir, f))
+                print(f"  {f} ({size // 1024}KB)")
+    else:
+        print(f"\n警告: 背景图目录不存在: {args.bg_dir}")
+
+    # 创建临时目录
+    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build", "spiffs_temp")
     os.makedirs(temp_dir, exist_ok=True)
-    image_path = os.path.join(temp_dir, "spiffs_icons.bin")
+
+    # 转换PNG图标
+    print("\n步骤1: 转换PNG图标...")
+    if not convert_png_to_bin():
+        return 1
+
+    # 转换JPG背景图
+    if os.path.exists(args.bg_dir) and jpg_files:
+        print("\n步骤2: 转换JPG背景图...")
+        if not convert_jpg_to_bin(temp_dir):
+            return 1
 
     # 创建 SPIFFS 镜像
-    if not create_spiffs_image(image_path, args.icons_dir):
+    print("\n步骤3: 创建SPIFFS镜像...")
+    build_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
+    os.makedirs(build_dir, exist_ok=True)
+    image_path = os.path.join(build_dir, "spiffs_icons.bin")
+
+    if not create_spiffs_image(image_path, temp_dir):
         return 1
 
     if args.only_pack:
@@ -139,6 +209,7 @@ def main():
         return 0
 
     # 烧录到 ESP32
+    print("\n步骤4: 烧录到ESP32...")
     if flash_spiffs(args.port, image_path):
         print("\n烧录成功!")
         return 0

@@ -13,8 +13,8 @@
 #define DAILY_MAX     10
 
 // Freshness thresholds (seconds)
-#define HOURLY_FRESH_SECS  3600    // 1 hour
-#define DAILY_FRESH_SECS   43200   // 12 hours
+#define HOURLY_FRESH_SECS  7200    // 2 hours
+#define DAILY_FRESH_SECS   86400   // 24 hours
 
 // Weather data structure (current conditions) — only fields used by UI
 typedef struct {

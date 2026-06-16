@@ -552,13 +552,15 @@ bool weather_fetch_daily(daily_forecast_t* forecast)
 
         char iso_date[16];
         if (json_get_string(p, "fxDate", iso_date, sizeof(iso_date))) {
+            // Parse "YYYY-MM-DD" → "DD" (day only, e.g. "16")
             char *d1 = strchr(iso_date, '-');
             if (d1) {
                 d1++;
                 char *d2 = strchr(d1, '-');
-                if (d2)
-                    snprintf(item->fx_date, 6, "%.2s/%.2s", d1, d2 + 1);
-                else {
+                if (d2) {
+                    d2++;  // point to day
+                    snprintf(item->fx_date, 6, "%s", d2);
+                } else {
                     strncpy(item->fx_date, d1, 5);
                     item->fx_date[5] = '\0';
                 }
