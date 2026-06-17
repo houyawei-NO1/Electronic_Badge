@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file button.c
  * @brief Button handling implementation with debounce and long press detection
  */

@@ -182,6 +182,12 @@ static void cleanup_forecast_icons(void)
     }
 }
 
+void display_free_forecast_icon_caches(void)
+{
+    cleanup_forecast_icons();
+    ESP_LOGI(TAG, "[预报图标] 已释放缓存");
+}
+
 static bool load_weather_icon_into_slot(int16_t weather_code, int slot, lv_img_dsc_t *out_dsc)
 {
     if (!out_dsc || slot < 0 || slot >= 10) {
@@ -403,10 +409,10 @@ static esp_err_t load_background_image(int index)
 }
 
 /**
- * @brief Load the next background image (cycle through available images).
+ * @brief Load a random background image.
  *        Called each time screensaver is displayed.
  */
-static esp_err_t load_next_background_image(void)
+static esp_err_t load_random_background_image(void)
 {
     /* First time: count available images */
     if (cached_bg_image.total_count == 0) {
@@ -418,8 +424,16 @@ static esp_err_t load_next_background_image(void)
         ESP_LOGI(TAG, "[背景图] 发现 %d 张背景图", cached_bg_image.total_count);
     }
 
-    /* Load next image in cycle */
-    int next_index = (cached_bg_image.current_index + 1) % cached_bg_image.total_count;
+    /* Pick a random image different from the current one (if possible) */
+    int next_index;
+    if (cached_bg_image.total_count <= 1) {
+        next_index = 0;
+    } else {
+        do {
+            next_index = rand() % cached_bg_image.total_count;
+        } while (next_index == cached_bg_image.current_index);
+    }
+    ESP_LOGI(TAG, "[背景图] 随机选择: %d/%d", next_index + 1, cached_bg_image.total_count);
     return load_background_image(next_index);
 }
 
@@ -719,6 +733,21 @@ void display_deinit(void)
 }
 
 /* =========================================================================
+ * Background image cache management
+ * ========================================================================= */
+void display_free_background_cache(void)
+{
+    if (cached_bg_image.pixel_buf) {
+        heap_caps_free(cached_bg_image.pixel_buf);
+        cached_bg_image.pixel_buf = NULL;
+        cached_bg_image.current_index = 0;
+        /* Keep total_count so next load_random_background_image() works */
+        ESP_LOGI(TAG, "[背景图] 已释放缓存 (腾出 ~%u bytes)",
+                 (unsigned)cached_bg_image.dsc.data_size);
+    }
+}
+
+/* =========================================================================
  * Animation callbacks
  * ========================================================================= */
 static void icon_float_anim_cb(void *var, int32_t v)
@@ -892,20 +921,6 @@ void display_loading_status(const char *status)
                                   LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_label_set_text(objects.label_1, status);
     }
-    lvgl_port_unlock();
-}
-
-/**
- * @brief Stop all LVGL animations to free memory for SSL/TLS operations.
- *        This is critical before making HTTPS requests to avoid
- *        mbedtls_ssl_setup error -0x7F00 (memory allocation failure).
- */
-void display_stop_animations(void)
-{
-    if (!is_initialized || !disp_handle) return;
-
-    lvgl_port_lock(0);
-    lv_anim_del(NULL, NULL);
     lvgl_port_unlock();
 }
 
@@ -1150,12 +1165,19 @@ void display_config_success(void)
  * ========================================================================= */
 static lv_obj_t *screensaver_overlay = NULL;
 
-void display_screensaver(int hour, int minute)
+void display_screensaver(int hour, int minute, bool change_bg)
 {
     if (!is_initialized || !disp_handle) return;
 
-    /* Load next background image BEFORE entering LVGL lock (fread + malloc, no LVGL calls) */
-    esp_err_t bg_ret = load_next_background_image();
+    /* Load next background image ONLY when entering screensaver (change_bg=true).
+     * For minute refresh, skip loading to avoid changing background every minute. */
+    esp_err_t bg_ret = ESP_FAIL;
+    if (change_bg) {
+        bg_ret = load_random_background_image();
+    } else if (cached_bg_image.pixel_buf) {
+        /* Use already-loaded background */
+        bg_ret = ESP_OK;
+    }
 
     lvgl_port_lock(0);
 
@@ -1203,9 +1225,10 @@ void display_screensaver(int hour, int minute)
         lv_obj_t *bg_img = lv_img_create(screensaver_overlay);
         lv_img_set_src(bg_img, &cached_bg_image.dsc);
         lv_obj_align(bg_img, LV_ALIGN_CENTER, 0, 0);
-        lv_img_set_zoom(bg_img, 512);  /* 120x120 * 2 = 240x240 */
-        ESP_LOGI(TAG, "[背景图] 显示 zoom=512 (原图%dx%d)",
-                 cached_bg_image.dsc.header.w, cached_bg_image.dsc.header.h);
+        int zoom = (240 * 256) / cached_bg_image.dsc.header.w;
+        lv_img_set_zoom(bg_img, zoom);
+        ESP_LOGI(TAG, "[背景图] 显示 zoom=%d (原图%dx%d)",
+                 zoom, cached_bg_image.dsc.header.w, cached_bg_image.dsc.header.h);
     }
 
     // Big clock centered

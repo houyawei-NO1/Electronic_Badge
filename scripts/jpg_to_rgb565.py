@@ -26,11 +26,11 @@ import sys
 import struct
 
 
-# Background image size (120x120, zoom=512 → 240x240 full screen)
-# 120x120 RGB565 = ~28.8 KB. ESP32-C3 max free heap block is often ~28KB.
-# If malloc fails at runtime, code falls back to 80x80.
-BG_WIDTH = 120
-BG_HEIGHT = 120
+# Background image size (140x140, zoom=439 → 240x240 full screen)
+# 140x140 RGB565 = ~39 KB. ESP32-C3 max free heap block varies.
+# If malloc fails, background is skipped (black screen saver).
+BG_WIDTH = 140
+BG_HEIGHT = 140
 
 
 def jpg_to_rgb565(jpg_path: str, bin_path: str, width: int = BG_WIDTH, height: int = BG_HEIGHT) -> None:
@@ -108,6 +108,7 @@ def main():
     print(f"Total binary size: {total_bytes} bytes ({total_bytes/1024:.1f} KB)")
     print(f"Each image: {BG_WIDTH}x{BG_HEIGHT} RGB565 = ~{total_bytes//count//1024 if count else 0} KB")
     print(f"zoom = {240 * 256 // BG_WIDTH} (LVGL zoom to fill 240x240 screen)")
+    print(f"NOTE: 140x140 needs ~39KB RAM. If malloc fails, background is skipped.")
 
 
 if __name__ == "__main__":

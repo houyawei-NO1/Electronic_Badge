@@ -216,12 +216,16 @@ bool weather_fetch(weather_data_t* data)
         .timeout_ms = 10000,
         .skip_cert_common_name_check = true,  // Skip CN check for development
         .disable_auto_redirect = false,
-        .buffer_size = 16384,
+        .buffer_size = 4096,
         .buffer_size_tx = 1024,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     
+    ESP_LOGI(TAG, "HTTP内存: 可用堆=%d, 最大块=%d",
+             (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
         ESP_LOGE(TAG, "初始化HTTP客户端失败");
@@ -399,7 +403,7 @@ bool weather_fetch_hourly(hourly_forecast_t* forecast)
         .timeout_ms = 10000,
         .skip_cert_common_name_check = true,
         .disable_auto_redirect = false,
-        .buffer_size = 16384,
+        .buffer_size = 4096,
         .buffer_size_tx = 1024,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -503,7 +507,7 @@ bool weather_fetch_daily(daily_forecast_t* forecast)
         .timeout_ms = 10000,
         .skip_cert_common_name_check = true,
         .disable_auto_redirect = false,
-        .buffer_size = 16384,
+        .buffer_size = 4096,
         .buffer_size_tx = 1024,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .crt_bundle_attach = esp_crt_bundle_attach,

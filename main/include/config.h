@@ -60,8 +60,10 @@
 // Light sleep interval: 1 minute (time refresh period)
 #define LIGHT_SLEEP_INTERVAL_US   (60 * 1000000ULL)   // 1 minute
 
-// Weather update interval: 30 minutes (only in active/update mode)
-#define WEATHER_UPDATE_INTERVAL_US (30 * 60 * 1000000ULL)  // 30 minutes
+// Weather update interval: 6 hours (only in active/update mode)
+// NOTE: The actual threshold is checked inline as (3600 * 6) in main.c.
+//       This macro is kept for reference but may not be used directly.
+#define WEATHER_UPDATE_INTERVAL_US (6 * 60 * 60 * 1000000ULL)  // 6 hours
 
 // Legacy deep sleep interval (kept for reference, no longer used)
 #ifdef CONFIG_UPDATE_INTERVAL_MINUTES
@@ -80,7 +82,7 @@
 #endif
 
 #define WIFI_CONNECT_TIMEOUT_MS  20000  // 20 seconds per config
-#define WIFI_MAX_RETRY     3           // Max retry attempts per config
+#define WIFI_MAX_RETRY     5           // Max retry attempts per config
 
 // SmartConfig timeout (5 minutes)
 #define SMARTCONFIG_TIMEOUT_MS  (5 * 60 * 1000)

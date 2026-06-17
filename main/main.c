@@ -358,21 +358,24 @@ static void enter_low_power_mode(void)
 {
     ESP_LOGI(TAG, "=== 低功耗模式 ===");
 
-    // 注意: power_enable_light_sleep() 和 power_disable_light_sleep()
-    // 现在由 power_enter_low_power_mode() 在内部管理（仅真正 light sleep 路径启用，
-    // USB 连接走软件轮询时不启用）。这里不用再调它们。
+    // Step 1: Disconnect WiFi FIRST to free memory (SSL buffers, WiFi driver)
+    // Background image needs ~29KB; WiFi+SSL may occupy 30-50KB.
+    if (wifi_is_connected()) {
+        ESP_LOGI(TAG, "低功耗模式: 断开WiFi");
+    }
+    wifi_disconnect_safe();
+    vTaskDelay(pdMS_TO_TICKS(100));  // Wait for WiFi to fully stop
 
-    // Show screensaver with current time
+    // Step 2: Free forecast icon caches (hourly/daily weather icons)
+    // These are only needed in display mode, not in screensaver.
+    display_free_forecast_icon_caches();
+
+    // Step 3: Show screensaver with current time (load new background)
+    // Now that WiFi memory is freed, background image malloc should succeed.
     time_t now;
     time(&now);
     struct tm* tm_info = localtime(&now);
-    display_screensaver(tm_info->tm_hour, tm_info->tm_min);
-
-    // Ensure WiFi is disconnected in low power mode
-    if (wifi_is_connected()) {
-        ESP_LOGI(TAG, "低功耗模式: 断开WiFi");
-        wifi_disconnect_safe();
-    }
+    display_screensaver(tm_info->tm_hour, tm_info->tm_min, true);
 
     // Light sleep loop: wake up every minute to refresh time
     while (1) {
@@ -381,6 +384,9 @@ static void enter_low_power_mode(void)
         if (!timer_wakeup) {
             // GPIO wakeup (button pressed) -> return to caller to re-enter display mode
             ESP_LOGI(TAG, "按键唤醒，进入显示模式");
+            // Free background image cache before returning (~29KB freed)
+            // LVGL screensaver overlay will be cleaned up by enter_display_mode()
+            display_free_background_cache();
             return;
         }
 
@@ -392,16 +398,16 @@ static void enter_low_power_mode(void)
         static int last_minute = -1;
         if (tm_info->tm_min != last_minute) {
             last_minute = tm_info->tm_min;
-            display_screensaver(tm_info->tm_hour, tm_info->tm_min);
+            display_screensaver(tm_info->tm_hour, tm_info->tm_min, false);  // only update time
             ESP_LOGI(TAG, "屏保刷新: %02d:%02d", tm_info->tm_hour, tm_info->tm_min);
         }
 
-        // Check if weather data is stale (> 30 min) and needs update
+        // Check if weather data is stale (> 6 hours) and needs update
         // (Only check, don't update here - update happens when user enters display mode)
         time_t now_sec = time(NULL);
         if (s_has_weather &&
-            (now_sec - (time_t)s_last_weather_update) > (30 * 60)) {
-            ESP_LOGI(TAG, "天气数据已过期 (>30分钟)，下次进入显示模式时更新");
+            (now_sec - (time_t)s_last_weather_update) > (3600 * 6)) {
+            ESP_LOGI(TAG, "天气数据已过期 (>6小时)，下次进入显示模式时更新");
         }
     }
 }
@@ -420,6 +426,12 @@ static bool enter_update_mode(bool show_loading_ui)
         }
     }
     display_backlight_on();
+
+    // Free background image cache to save RAM for HTTP client (SSL needs ~20KB)
+    display_free_background_cache();
+    ESP_LOGI(TAG, "更新模式: 释放背景图后 可用堆=%d, 最大块=%d",
+             (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     // Always show loading screen during update (not just when show_loading_ui=true)
     display_loading("WiFi_INIT");
@@ -444,11 +456,6 @@ static bool enter_update_mode(bool show_loading_ui)
     // Sync time
     display_loading_status("同步NTP");
     sync_time();
-
-    // Stop LVGL animations before HTTPS request to free memory for SSL/TLS
-    // This fixes mbedtls_ssl_setup error -0x7F00 (memory allocation failure)
-    extern void display_stop_animations(void);
-    display_stop_animations();
 
     // Fetch current weather first (show main screen ASAP)
     display_loading_status("更新天气");

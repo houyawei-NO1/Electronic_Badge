@@ -1,20 +1,22 @@
 /**
  * @file power.c
- * @brief Power management implementation - Light Sleep (Low Power Mode)
+ * @brief Power management implementation — Low Power Mode (software polling)
  *
- * Uses ESP32-C3 light sleep instead of deep sleep to preserve:
- *   - RAM contents (no RTC memory needed)
- *   - GPIO states (backlight stays on)
- *   - Screen content (no re-initialization needed)
+ * Uses software polling (vTaskDelay loop) instead of light sleep to:
+ *   - Preserve RAM contents (no RTC memory needed)
+ *   - Preserve GPIO states (backlight stays on)
+ *   - Preserve screen content (no re-initialization needed)
+ *   - Keep USB Serial/JTAG functional for debugging
  *
  * Wake-up sources:
  *   - Timer: every minute to refresh the time display
  *   - GPIO:  button press to enter active display mode
  *
- * Implementation note:
- *   We use esp_light_sleep_start() with proper GPIO wakeup configuration.
- *   For Light-sleep, GPIO wakeup must use gpio_wakeup_enable() + 
- *   esp_sleep_enable_gpio_wakeup(), NOT esp_deep_sleep_enable_gpio_wakeup().
+ * Design decision:
+ *   ESP32-C3's USB Serial/JTAG does NOT survive light sleep, and
+ *   usb_serial_jtag_is_connected() is unreliable on C3. GPIO wakeup
+ *   from light sleep may also not work correctly. Therefore we use
+ *   software polling (50ms GPIO check loop) instead of esp_light_sleep_start().
  */
 #include <string.h>
 #include "power.h"
@@ -31,7 +33,7 @@ static const char *TAG = "power";
 void power_init(void)
 {
     /* Configure button pins as inputs with pull-up.
-     * In light sleep these pins retain their state. */
+     * These pins are polled every 50ms in the low-power loop. */
     gpio_config_t btn_conf = {
         .pin_bit_mask = (1ULL << GPIO_BTN_WAKE) | (1ULL << GPIO_BTN_REFRESH),
         .mode = GPIO_MODE_INPUT,
@@ -41,30 +43,33 @@ void power_init(void)
     };
     gpio_config(&btn_conf);
 
-    /* LCD pins: keep as-is in light sleep (state is preserved).
-     * No need to pull-down RST/backlight because light sleep
-     * preserves GPIO output levels. */
+    /* LCD pins: keep as-is (state is preserved during software polling).
+     * No need to pull-down RST/backlight because GPIO output levels
+     * are maintained while the CPU is running. */
 
     /* NOTE: esp_pm_configure(.light_sleep_enable = true) is NOT called
-     * here. It is deferred to power_enable_light_sleep() which is called
-     * from enter_low_power_mode() — the screensaver loop.
+     * here. In the current software polling implementation, tickless idle
+     * light sleep is not used. power_enable_light_sleep() is kept for
+     * potential future use if light sleep support is added.
      *
-     * Why? Calling it here would enable tickless idle light sleep globally,
-     * which means every vTaskDelay() in display_init() / enter_display_mode()
-     * / enter_update_mode() would cause the system to enter light sleep,
-     * stalling UART log output and making the boot sequence appear to hang.
-     * We only want automatic light sleep during the low-power screensaver
-     * phase, not during normal display/update phases. */
-    ESP_LOGI(TAG, "电源管理初始化完成 (按键GPIO已配置, 自动light sleep已推迟)");
+     * Why not enable globally? Calling it here would enable tickless idle
+     * light sleep globally, which means every vTaskDelay() in display_init()
+     * / enter_display_mode() / enter_update_mode() would cause the system
+     * to enter light sleep, stalling UART log output and making the boot
+     * sequence appear to hang. */
+    ESP_LOGI(TAG, "电源管理初始化完成 (按键GPIO已配置)");
 }
 
 void power_enable_light_sleep(void)
 {
     /* Enable tickless idle light sleep.
+     *
+     * NOTE: Currently NOT called in the software polling implementation.
+     * Kept for potential future use if light sleep support is added.
+     *
      * ESP32-C3 requires this before esp_light_sleep_start() works,
      * and it also enables automatic light sleep during FreeRTOS idle
-     * periods — which is exactly what we want during the low-power
-     * screensaver loop.
+     * periods.
      *
      * After this call:
      *   - idle task will automatically enter light sleep (saves power)
@@ -87,6 +92,9 @@ void power_disable_light_sleep(void)
 {
     /* Disable automatic tickless idle light sleep — restore full CPU speed.
      *
+     * NOTE: Currently NOT called in the software polling implementation.
+     * Kept for potential future use if light sleep support is added.
+     *
      * After this call:
      *   - idle task will NOT enter light sleep (CPU stays at max frequency)
      *   - UART logs emit normally (no stalls during vTaskDelay)
@@ -106,7 +114,12 @@ void power_disable_light_sleep(void)
 
 void power_configure_wakeup(uint64_t timer_interval_us)
 {
-    /* Timer wakeup for periodic time refresh */
+    /* Configure wakeup sources for potential future light sleep use.
+     *
+     * NOTE: Currently NOT called in the software polling implementation.
+     * Kept for potential future use if light sleep support is added.
+     *
+     * Timer wakeup for periodic time refresh */
     if (timer_interval_us > 0) {
         esp_err_t ret = esp_sleep_enable_timer_wakeup(timer_interval_us);
         if (ret != ESP_OK) {
@@ -120,6 +133,8 @@ void power_configure_wakeup(uint64_t timer_interval_us)
      * For Light-sleep, use gpio_wakeup_enable() per-pin,
      * then esp_sleep_enable_gpio_wakeup() to enable globally.
      * DO NOT use esp_deep_sleep_enable_gpio_wakeup() - it's for Deep-sleep only! */
+    gpio_wakeup_disable(GPIO_BTN_WAKE);
+    gpio_wakeup_disable(GPIO_BTN_REFRESH);
     esp_err_t ret = gpio_wakeup_enable(GPIO_BTN_WAKE, GPIO_INTR_LOW_LEVEL);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "GPIO%d wakeup enable 失败: %d", GPIO_BTN_WAKE, ret);
@@ -136,62 +151,29 @@ void power_configure_wakeup(uint64_t timer_interval_us)
 
 bool power_enter_low_power_mode(uint64_t wakeup_interval_us)
 {
-    /*
+    /* ============================================================
+     * Software polling mode
      * ============================================================
-     * Software polling mode (used during development / USB debugging)
-     * ============================================================
      *
-     * Instead of entering real light sleep (esp_light_sleep_start), we poll
-     * GPIO buttons in a software loop. This keeps USB Serial/JTAG alive so
-     * logs print continuously and flashing is always possible.
+     * Uses vTaskDelay(50ms) loop to poll GPIO buttons.
+     * This keeps USB Serial/JTAG alive for debugging.
      *
-     * The ESP32-C3 built-in USB Serial/JTAG controller does NOT survive
-     * light sleep — the hardware connection drops and the host PC COM port
-     * is lost, requiring a USB re-plug to recover. ESP-IDF's
-     * usb_serial_jtag_is_connected() is unreliable on C3 because it depends
-     * on SOF packets which may never arrive in CDC mode.
+     * Real light sleep (esp_light_sleep_start) is NOT used because:
+     *   1. ESP32-C3 USB Serial/JTAG does NOT survive light sleep
+     *   2. usb_serial_jtag_is_connected() is unreliable on C3
+     *   3. GPIO wakeup from light sleep may not work correctly
      *
-     * For production battery operation, this can be replaced with a real
-     * esp_light_sleep_start() path (see commented code at bottom of file).
+     * For true battery power saving, consider deep sleep instead.
      */
-
-    /* Poll GPIO in a 50ms loop for wakeup_interval_us duration.
-     * No tickless idle is active (we never call power_enable_light_sleep()),
-     * so vTaskDelay(50) is a true 50ms delay — buttons are polled reliably. */
     uint64_t elapsed = 0;
     while (elapsed < wakeup_interval_us) {
         vTaskDelay(pdMS_TO_TICKS(50));
         elapsed += 50000;
-
-        /* Check if a wakeup button is pressed (active low).
-         * Using gpio_get_level() which reads the GPIO input register directly,
-         * independent of any ISR or interrupt configuration. */
         if (!gpio_get_level(GPIO_BTN_WAKE) || !gpio_get_level(GPIO_BTN_REFRESH)) {
             return false;  // GPIO wakeup (button pressed)
         }
     }
     return true;  // Timer wakeup (poll timeout elapsed)
-
-    /* ============================================================
-     * Real Light Sleep path (battery mode) — uncomment for production
-     * ============================================================
-     *
-    power_configure_wakeup(wakeup_interval_us);
-    power_enable_light_sleep();
-    ESP_LOGI(TAG, "进入低功耗模式 (light sleep), 唤醒间隔 %llu us", wakeup_interval_us);
-    fflush(stdout);
-    esp_err_t ret = esp_light_sleep_start();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "light sleep 失败: %d", ret);
-        power_disable_light_sleep();
-        return false;
-    }
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    bool timer_wakeup = (cause == ESP_SLEEP_WAKEUP_TIMER);
-    ESP_LOGI(TAG, "从低功耗模式唤醒, 原因: %s", timer_wakeup ? "timer" : "gpio");
-    power_disable_light_sleep();
-    return timer_wakeup;
-    */
 }
 
 esp_sleep_wakeup_cause_t power_get_wakeup_cause(void)

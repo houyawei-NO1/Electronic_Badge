@@ -83,13 +83,6 @@ esp_err_t display_prepare_weather_icon(int16_t weather_code);
 void display_loading_status(const char* status);
 
 /**
- * @brief Stop all LVGL animations to free memory for SSL/TLS operations.
- *        This is critical before making HTTPS requests to avoid
- *        mbedtls_ssl_setup error -0x7F00 (memory allocation failure).
- */
-void display_stop_animations(void);
-
-/**
  * @brief Display WiFi config mode screen
  */
 void display_config_mode(void);
@@ -104,8 +97,9 @@ void display_config_success(void);
  * Shows a simple clock or pattern to prevent screen burn-in
  * @param hour Hour (0-23)
  * @param minute Minute (0-59)
+ * @param change_bg true to load next background image, false to only update time
  */
-void display_screensaver(int hour, int minute);
+void display_screensaver(int hour, int minute, bool change_bg);
 
 /**
  * @brief Display hourly forecast screen
@@ -131,5 +125,19 @@ void display_deinit(void);
  * @return true if initialized, false otherwise
  */
 bool display_is_initialized(void);
+
+/**
+ * @brief Free background image cache to save RAM.
+ *        Call before memory-intensive operations (e.g. HTTP requests).
+ *        Background will be reloaded on next display_screensaver() call.
+ */
+void display_free_background_cache(void);
+
+/**
+ * @brief Free forecast (hourly/daily) weather icon caches.
+ *        Call when entering low-power mode to save RAM.
+ *        Icons will be reloaded on next forecast display.
+ */
+void display_free_forecast_icon_caches(void);
 
 #endif // DISPLAY_H

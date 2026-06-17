@@ -208,8 +208,11 @@ bool wifi_connect(void)
 
 void wifi_disconnect(void)
 {
-    esp_wifi_disconnect();
-    esp_wifi_stop();
+    esp_err_t ret1 = esp_wifi_disconnect();
+    esp_err_t ret2 = esp_wifi_stop();
+    ESP_LOGI(TAG_WIFI, "WiFi断开: disconnect=%s, stop=%s",
+             ret1 == ESP_OK ? "OK" : "FAIL",
+             ret2 == ESP_OK ? "OK" : "FAIL");
     s_wifi_status = WIFI_STATUS_DISCONNECTED;
 }
 
