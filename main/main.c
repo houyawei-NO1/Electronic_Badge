@@ -427,9 +427,10 @@ static bool enter_update_mode(bool show_loading_ui)
     }
     display_backlight_on();
 
-    // Free background image cache to save RAM for HTTP client (SSL needs ~20KB)
+    // Free background image cache and forecast icon caches to save RAM for HTTP client (SSL needs ~20KB)
     display_free_background_cache();
-    ESP_LOGI(TAG, "更新模式: 释放背景图后 可用堆=%d, 最大块=%d",
+    display_free_forecast_icon_caches();
+    ESP_LOGI(TAG, "更新模式: 释放缓存后 可用堆=%d, 最大块=%d",
              (int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
