@@ -1,6 +1,6 @@
 /**
  * @file power.h
- * @brief Power management module — Low Power Mode (software polling)
+ * @brief Power management module — Light Sleep / Low Power Mode
  *
  * [HARDWARE LIMITATION]
  * The RST pin (GPIO5) is shared with the backlight power control on this
@@ -8,16 +8,16 @@
  * power_init(), which turns off the backlight but also resets the GC9A01
  * controller. On wakeup the panel must be fully re-initialized.
  *
- * [DESIGN DECISION — Software Polling instead of Light Sleep]
- * ESP32-C3's built-in USB Serial/JTAG does NOT survive light sleep.
- * Additionally, usb_serial_jtag_is_connected() is unreliable on C3,
- * and GPIO wakeup from light sleep may not work correctly.
- * Therefore we use software polling (vTaskDelay loop) instead:
- * - CPU polls GPIO buttons every 50ms
- * - RAM is retained, GPIO states preserved, screen content visible
- * - WiFi stays off to save power
+ * To avoid this, we use LIGHT SLEEP instead of DEEP SLEEP:
+ * - CPU stops, RAM is retained
+ * - GPIO states are preserved (backlight stays on)
+ * - Screen content remains visible
  * - Wake up every minute to refresh the time display
- * - USB Serial/JTAG remains functional for debugging
+ * - WiFi stays off to save power
+ *
+ * [GPIO WAKEUP]
+ * GPIO wakeup from light sleep requires pins configured with
+ * GPIO_INTR_LOW_LEVEL and internal pull-up enabled.
  */
 #ifndef POWER_H
 #define POWER_H
@@ -29,22 +29,16 @@
 /**
  * @brief Initialize power management (GPIO only, no auto light sleep)
  *
- * This only configures button GPIO pins. Auto light sleep (tickless idle)
+ * This only configures button GPIO pins with GPIO_INTR_LOW_LEVEL
+ * for light sleep GPIO wakeup. Auto light sleep (tickless idle)
  * is NOT enabled here — call power_enable_light_sleep() before the first
  * esp_light_sleep_start(). This keeps UART logs and CPU at full speed
  * during normal display / update phases.
- *
- * NOTE: In the current software polling implementation, power_enable_light_sleep()
- * and esp_light_sleep_start() are not used. This function is kept for
- * potential future use if light sleep support is added.
  */
 void power_init(void);
 
 /**
  * @brief Enable automatic tickless idle light sleep.
- *
- * NOTE: Currently NOT used in the software polling implementation.
- * Kept for potential future use if light sleep support is added.
  *
  * Call this once before entering the low-power screensaver loop.
  * After this call, FreeRTOS idle task will automatically enter light sleep
@@ -59,9 +53,6 @@ void power_enable_light_sleep(void);
 /**
  * @brief Disable automatic tickless idle light sleep.
  *
- * NOTE: Currently NOT used in the software polling implementation.
- * Kept for potential future use if light sleep support is added.
- *
  * Call this when waking up from low-power mode and resuming normal
  * display/update operations. Restores CPU to full speed so UART logs
  * emit normally and UI updates feel responsive.
@@ -69,25 +60,20 @@ void power_enable_light_sleep(void);
 void power_disable_light_sleep(void);
 
 /**
- * @brief Enter low-power mode (software polling).
+ * @brief Enter low-power mode (light sleep).
  *
- * Uses vTaskDelay(50ms) loop to poll GPIO buttons.
- * The function blocks until one of the following occurs:
- *   - Timer expires (wakeup_interval_us) → returns true
- *   - GPIO button is pressed → returns false
+ * The CPU halts until one of the following occurs:
+ *   - Timer expires (wakeup_interval_us)
+ *   - GPIO button is pressed
  *
- * In low-power mode:
+ * In light sleep:
  *   - RAM is retained (no RTC memory needed)
  *   - GPIO states are preserved (backlight stays on)
  *   - Screen content remains visible
- *   - WiFi/BT must be stopped by caller before entering
- *   - USB Serial/JTAG remains functional
- *
- * NOTE: This does NOT use esp_light_sleep_start() due to ESP32-C3
- * USB Serial/JTAG limitations. See file header for details.
+ *   - WiFi/BT must be stopped by caller before entering sleep
  *
  * @param wakeup_interval_us Timer wakeup interval in microseconds
- * @return true if woken by timer (timeout), false if woken by GPIO (button)
+ * @return true if woken by timer, false if woken by GPIO
  */
 bool power_enter_low_power_mode(uint64_t wakeup_interval_us);
 
@@ -98,7 +84,7 @@ bool power_enter_low_power_mode(uint64_t wakeup_interval_us);
 esp_sleep_wakeup_cause_t power_get_wakeup_cause(void);
 
 /**
- * @brief Configure GPIO wakeup sources
+ * @brief Configure GPIO and timer wakeup sources
  * @param timer_interval_us Timer wakeup interval (0 to disable)
  */
 void power_configure_wakeup(uint64_t timer_interval_us);

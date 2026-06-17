@@ -54,6 +54,19 @@ bool button_is_pressed(button_id_t id);
 void button_reset(void);
 
 /**
+ * @brief Set GPIO interrupt type for light sleep wakeup.
+ *        Call before entering light sleep (needs LOW_LEVEL).
+ *        Call button_restore_interrupt_type() after wakeup.
+ */
+void button_set_sleep_interrupt_type(void);
+
+/**
+ * @brief Restore GPIO interrupt type for normal button operation.
+ *        Call after waking up from light sleep.
+ */
+void button_restore_interrupt_type(void);
+
+/**
  * @brief Task to monitor button states
  * @param arg Task arguments
  */

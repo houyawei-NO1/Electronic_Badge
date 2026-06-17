@@ -115,6 +115,20 @@ void button_reset(void)
     }
 }
 
+void button_set_sleep_interrupt_type(void)
+{
+    for (int i = 0; i < BUTTON_MAX; i++) {
+        gpio_set_intr_type(button_configs[i].gpio, GPIO_INTR_LOW_LEVEL);
+    }
+}
+
+void button_restore_interrupt_type(void)
+{
+    for (int i = 0; i < BUTTON_MAX; i++) {
+        gpio_set_intr_type(button_configs[i].gpio, GPIO_INTR_ANYEDGE);
+    }
+}
+
 void button_task(void* arg)
 {
     (void)arg;
